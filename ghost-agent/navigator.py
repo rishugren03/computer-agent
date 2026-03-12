@@ -24,6 +24,10 @@ from human import (
 from browser import take_screenshot, wait_for_stable
 from accessibility import extract_act, find_buttons, find_links, find_textboxes
 from config import DETOUR_PROBABILITY, SCREENSHOT_DIR
+from semantic_map import SemanticMap
+
+# Module-level semantic cache singleton
+_smap = SemanticMap()
 
 
 # ─── Core Navigation ────────────────────────────────────────────────────────
@@ -36,14 +40,7 @@ def navigate_to_feed(page):
     """
     print("[Navigator] Going to home feed...")
 
-    # Try clicking the Home nav element
-    tree = extract_act(page)
-    home_buttons = find_links(tree, "Home")
-
-    if home_buttons:
-        # Find the nav Home link
-        _click_act_element(page, home_buttons[0])
-    else:
+    if not _click_cached_or_discover(page, "nav_home", "link", "Home", find_links):
         # Fallback: navigate directly (less ideal but functional)
         page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
 
@@ -61,11 +58,9 @@ def navigate_to_search(page, query):
     """
     print(f"[Navigator] Searching for: {query}")
 
-    tree = extract_act(page)
-    search_inputs = find_textboxes(tree, "Search")
+    clicked = _click_cached_or_discover(page, "search_input", "textbox", "Search", find_textboxes)
 
-    if search_inputs:
-        _click_act_element(page, search_inputs[0])
+    if clicked:
         random_delay(0.3, 0.6)
         # Clear existing text and type new query
         page.keyboard.press("Control+a")
@@ -122,12 +117,7 @@ def navigate_to_notifications(page):
     """Check notifications naturally."""
     print("[Navigator] Checking notifications...")
 
-    tree = extract_act(page)
-    notif_links = find_links(tree, "Notifications")
-
-    if notif_links:
-        _click_act_element(page, notif_links[0])
-    else:
+    if not _click_cached_or_discover(page, "nav_notifications", "link", "Notifications", find_links):
         page.goto("https://www.linkedin.com/notifications/", wait_until="domcontentloaded")
 
     wait_for_stable(page)
@@ -143,12 +133,7 @@ def navigate_to_messaging(page):
     """Go to messaging inbox naturally."""
     print("[Navigator] Opening messaging...")
 
-    tree = extract_act(page)
-    msg_links = find_links(tree, "Messaging")
-
-    if msg_links:
-        _click_act_element(page, msg_links[0])
-    else:
+    if not _click_cached_or_discover(page, "nav_messaging", "link", "Messaging", find_links):
         page.goto("https://www.linkedin.com/messaging/", wait_until="domcontentloaded")
 
     wait_for_stable(page)
@@ -159,12 +144,7 @@ def navigate_to_my_network(page):
     """Go to My Network page naturally."""
     print("[Navigator] Going to My Network...")
 
-    tree = extract_act(page)
-    network_links = find_links(tree, "My Network")
-
-    if network_links:
-        _click_act_element(page, network_links[0])
-    else:
+    if not _click_cached_or_discover(page, "nav_network", "link", "My Network", find_links):
         page.goto("https://www.linkedin.com/mynetwork/", wait_until="domcontentloaded")
 
     wait_for_stable(page)
@@ -251,21 +231,76 @@ def _try_like_current_post(page):
 def _click_people_tab(page):
     """Click the 'People' tab in search results."""
     try:
-        tree = extract_act(page)
-        people_tabs = find_buttons(tree, "People")
-        if not people_tabs:
-            people_tabs = find_links(tree, "People")
-
-        if people_tabs:
-            _click_act_element(page, people_tabs[0])
-            wait_for_stable(page)
-        else:
-            print("[Navigator] Could not find People tab")
+        if not _click_cached_or_discover(page, "search_tab_people", "button", "People", find_buttons):
+            # Try links too
+            if not _click_cached_or_discover(page, "search_tab_people", "link", "People", find_links):
+                print("[Navigator] Could not find People tab")
+                return
+        wait_for_stable(page)
     except Exception as e:
         print(f"[Navigator] Error clicking People tab: {e}")
 
 
-# ─── ACT Element Clicking ───────────────────────────────────────────────────
+# ─── SemanticMap-Accelerated Element Interaction ─────────────────────────────
+
+def _click_cached_or_discover(page, label, role, name, discover_fn):
+    """Try to click an element using SemanticMap cache first, then discover.
+
+    This is the core integration point for SemanticMap. On the first
+    interaction, it discovers the element via ACT and caches it. On
+    subsequent interactions, it skips ACT extraction entirely and uses
+    the cached role/name for instant Playwright lookup.
+
+    If a cached element fails (stale), it self-heals by invalidating
+    the cache and rediscovering.
+
+    Args:
+        page: Playwright page.
+        label: Semantic label (e.g., "nav_home", "search_input").
+        role: Expected ARIA role (e.g., "link", "button", "textbox").
+        name: Expected accessible name (e.g., "Home", "Search").
+        discover_fn: ACT discovery function (e.g., find_links, find_buttons).
+
+    Returns:
+        bool: True if the element was found and clicked.
+    """
+    # 1. Try cache first (instant)
+    cached = _smap.lookup(label)
+    if cached:
+        c_role = cached.get("role", role)
+        c_name = cached.get("name", name)
+        try:
+            locator = page.get_by_role(c_role, name=c_name)
+            if locator.count() > 0:
+                bbox = locator.first.bounding_box()
+                if bbox:
+                    cx = bbox["x"] + bbox["width"] / 2
+                    cy = bbox["y"] + bbox["height"] / 2
+                    print(f"[Navigator] ⚡ Cache hit: '{label}' → {c_role}:'{c_name}' at ({cx:.0f},{cy:.0f})")
+                    human_click(page, cx, cy)
+                    return True
+        except Exception:
+            pass
+        # Cache stale — invalidate and rediscover
+        print(f"[Navigator] 🔄 Cache stale for '{label}' — rediscovering...")
+        _smap.invalidate(label)
+
+    # 2. Discover via ACT (slower but reliable)
+    tree = extract_act(page)
+    elements = discover_fn(tree, name)
+
+    if elements:
+        element = elements[0]
+        # Cache the discovered element for next time
+        _smap.store(label, {
+            "role": element.get("role", role),
+            "name": element.get("name", name),
+        })
+        _click_act_element(page, element)
+        return True
+
+    return False
+
 
 def _click_act_element(page, act_node):
     """Click an element identified by its ACT node.

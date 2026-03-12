@@ -32,7 +32,7 @@ from scheduler import (
     get_schedule_info,
 )
 from guardrails import Guardrails
-from linkedin.auth import ensure_session, wait_for_login, is_logged_in
+from linkedin.auth import ensure_session, wait_for_login, is_logged_in, check_session_or_relogin
 from linkedin.warmup import WarmupSequence
 from linkedin.connect import send_connection
 from linkedin.interact import organic_feed_engagement, pre_connection_engagement
@@ -145,15 +145,14 @@ def run_agent(prospects=None, continuous=False):
             session_start = time.time()
             print(f"[Agent] Session duration: {session_duration // 60}min")
 
-            # Step 1: Organic feed engagement
+            # Step 1: Organic feed engagement (already on feed from open_browser)
             print("\n[Agent] 📱 Organic feed engagement...")
-            navigate_to_feed(page)
-            random_delay(1.0, 2.0)
             organic_feed_engagement(
                 page,
-                max_likes=random.randint(1, 3),
-                max_comments=random.randint(0, 1),
+                max_likes=random.randint(2, 4),
+                max_comments=random.randint(1, 2),
                 comment_generator=lambda content: generate_comment(content, persona),
+                guardrails=guardrails,
             )
 
             # Check if session time exhausted
@@ -168,8 +167,17 @@ def run_agent(prospects=None, continuous=False):
             # Step 2: Process approval queue (send approved connections)
             approved = queue.get_approved()
             if approved:
+                if not check_session_or_relogin(page):
+                    print("[Agent] ❌ Session lost before sending connections — aborting session")
+                    close_browser(context, playwright)
+                    continue
+
                 print(f"\n[Agent] 📨 Sending {len(approved)} approved connections...")
                 for item in approved:
+                    if not check_session_or_relogin(page):
+                        print("[Agent] ❌ Session lost while sending connections — aborting loop")
+                        break
+
                     if _session_expired(session_start, session_duration):
                         break
                     if not guardrails.can_connect():
@@ -203,6 +211,11 @@ def run_agent(prospects=None, continuous=False):
 
             # Step 3: Process inbox
             if not _session_expired(session_start, session_duration):
+                if not check_session_or_relogin(page):
+                    print("[Agent] ❌ Session lost before checking inbox — aborting session")
+                    close_browser(context, playwright)
+                    continue
+
                 print("\n[Agent] 📬 Checking inbox...")
                 inbox_summary = process_inbox(
                     page,
@@ -214,8 +227,17 @@ def run_agent(prospects=None, continuous=False):
 
             # Step 4: Generate new prospect notes (if we have prospects)
             if prospects and not _session_expired(session_start, session_duration):
+                if not check_session_or_relogin(page):
+                    print("[Agent] ❌ Session lost before prospecting — aborting session")
+                    close_browser(context, playwright)
+                    continue
+
                 print(f"\n[Agent] 🔍 Processing {len(prospects)} prospects...")
                 for prospect_name in prospects[:5]:  # Max 5 per session
+                    if not check_session_or_relogin(page):
+                        print("[Agent] ❌ Session lost during prospecting — aborting loop")
+                        break
+
                     if _session_expired(session_start, session_duration):
                         break
 

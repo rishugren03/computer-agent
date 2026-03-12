@@ -12,6 +12,7 @@ import random
 from human import human_type, human_click, random_delay, dwell_on_content
 from browser import wait_for_stable
 from navigator import navigate_to_messaging
+from linkedin.auth import check_session_or_relogin
 from accessibility import extract_act, find_by_text, find_buttons, find_textboxes
 from vision import describe_page
 
@@ -245,6 +246,11 @@ def process_inbox(page, reply_generator=None, guardrails=None):
         return summary
 
     for thread in unread:
+        # Periodic session check
+        if not check_session_or_relogin(page):
+            print("[Inbox] ❌ Session lost in inbox loop — aborting loop")
+            break
+
         name = thread["name"]
         preview = thread["preview"]
         intent = classify_message(preview)

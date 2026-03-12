@@ -98,6 +98,42 @@ def wait_for_login(page, timeout_seconds=300):
     return False
 
 
+def check_session_or_relogin(page, timeout_seconds=300):
+    """Check if still logged in mid-session. If not, wait for re-login.
+
+    Call this periodically during long-running operations (feed engagement,
+    inbox processing, etc.) to handle unexpected logouts gracefully.
+
+    The agent resumes from where it left off after re-login.
+
+    Returns:
+        bool: True if session is OK (or re-login succeeded), False if timeout.
+    """
+    try:
+        if is_logged_in(page):
+            return True
+    except Exception:
+        pass  # Page might be in a bad state during logout
+
+    # Logout detected!
+    print("\n[Auth] ⚠️  SESSION LOST — Logged out mid-session!")
+    print("[Auth] ⏳ Waiting for manual re-login...")
+    print(f"[Auth] Please log back in within {timeout_seconds // 60} minutes.")
+    print("[Auth] The agent will resume from where it left off.\n")
+
+    logged_back_in = wait_for_login(page, timeout_seconds=timeout_seconds)
+
+    if logged_back_in:
+        print("[Auth] ✅ Re-login successful — resuming session...")
+        # Give the page a moment to fully load after re-login
+        from browser import wait_for_stable
+        wait_for_stable(page, timeout=8000)
+        return True
+
+    print("[Auth] ❌ Re-login timeout — aborting session.")
+    return False
+
+
 def _detect_security_challenge(page):
     """Detect if LinkedIn is showing a security/identity challenge.
 

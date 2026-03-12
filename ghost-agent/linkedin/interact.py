@@ -21,6 +21,7 @@ from human import (
 )
 from browser import wait_for_stable
 from accessibility import extract_act, find_buttons, find_textboxes, find_by_text
+from linkedin.auth import check_session_or_relogin
 
 
 def _fast_click_like(page):
@@ -213,10 +214,14 @@ def _fast_click_like(page):
         for el in popup_info:
             print(f"[Interact]     label='{el['label']}' at ({el['x']:.0f},{el['y']:.0f})")
 
-        # Find the target reaction in the popup
+        # Filter to only elements near the Like button (reaction popup appears ~50-100px above)
+        nearby = [el for el in popup_info if abs(el["y"] - cy) < 120 and el["x"] > cx - 200 and el["x"] < cx + 300]
+        print(f"[Interact]   {len(nearby)} candidates near Like button (y≈{cy:.0f})")
+
+        # Find the target reaction — use EXACT label match to avoid "Love" matching "Lovely"
         for name in [target_reaction] + reaction_names:
-            for el in popup_info:
-                if name.lower() in el["label"].lower():
+            for el in nearby:
+                if el["label"].strip().lower() == name.lower():
                     rx, ry = el["x"], el["y"]
                     print(f"[Interact]   ✅ Clicking popup emoji '{el['label']}' at ({rx:.0f},{ry:.0f})")
                     page.mouse.move(rx, ry)
@@ -339,41 +344,126 @@ def comment_on_post(page, comment_text):
     random_delay(0.8, 1.5)
     wait_for_stable(page, timeout=3000)
 
-    # 2. Find the comment input
-    tree = extract_act(page)
-    comment_inputs = find_textboxes(tree, None)
+    # 2. Find the comment input — targeted search to avoid the search bar
+    comment_input_found = False
 
-    if not comment_inputs:
-        # Try looking for contenteditable
-        comment_inputs = find_by_text(tree, "Add a comment")
+    # 2A: DOM — look for the comment box specifically
+    print("[Interact] [Comment] Searching for comment input via DOM...")
+    try:
+        # LinkedIn comment boxes are contenteditable divs with specific ARIA labels
+        selectors = [
+            '[role="textbox"][aria-label*="comment" i]',
+            '[role="textbox"][aria-placeholder*="comment" i]',
+            '[contenteditable="true"][aria-label*="comment" i]',
+            '.ql-editor[contenteditable="true"]',
+            '[role="textbox"][aria-label*="Add a comment" i]',
+            'div.editor-content[contenteditable="true"]',
+        ]
+        for selector in selectors:
+            locator = page.locator(selector)
+            if locator.count() > 0:
+                bbox = locator.first.bounding_box()
+                if bbox and bbox["width"] > 10 and bbox["height"] > 5:
+                    cx = bbox["x"] + bbox["width"] / 2
+                    cy = bbox["y"] + bbox["height"] / 2
+                    print(f"[Interact] [Comment] ✅ DOM found comment input at ({cx:.0f},{cy:.0f}) via '{selector}'")
+                    human_click(page, cx, cy)
+                    comment_input_found = True
+                    break
+    except Exception as e:
+        print(f"[Interact] [Comment] DOM search error: {e}")
 
-    if comment_inputs:
-        _click_act_element(page, comment_inputs[0])
-        random_delay(0.3, 0.5)
-
-        # 3. Type the comment with natural speed
-        human_type(page, comment_text)
-        random_delay(0.5, 1.0)
-
-        # 4. Submit the comment
-        # LinkedIn uses a "Post" button or Ctrl+Enter
+    # 2B: ACT — search for textboxes with "comment" in the name
+    if not comment_input_found:
+        print("[Interact] [Comment] Searching via ACT...")
         tree = extract_act(page)
-        post_buttons = find_buttons(tree, "Post")
-        if not post_buttons:
-            post_buttons = find_buttons(tree, "Submit")
+        # First try textboxes with "comment" label
+        comment_inputs = find_textboxes(tree, "comment")
+        if not comment_inputs:
+            comment_inputs = find_by_text(tree, "Add a comment")
+        if not comment_inputs:
+            # Last resort: get all textboxes but SKIP searchbox role elements
+            from accessibility import find_node_by_role_and_name
+            comment_inputs = find_node_by_role_and_name(tree, "textbox", None)
+            # Filter out anything that looks like a search bar
+            comment_inputs = [
+                inp for inp in comment_inputs
+                if "search" not in (inp.get("name", "") or "").lower()
+            ]
 
-        if post_buttons:
-            _click_act_element(page, post_buttons[0])
-        else:
-            # Fallback: Ctrl+Enter to submit
-            page.keyboard.press("Control+Enter")
+        if comment_inputs:
+            print(f"[Interact] [Comment] ACT found {len(comment_inputs)} candidate(s)")
+            _click_act_element(page, comment_inputs[0])
+            comment_input_found = True
 
-        wait_for_stable(page, timeout=3000)
-        print("[Interact] 💬 Comment posted!")
-        return True
+    if not comment_input_found:
+        print("[Interact] Could not find comment input")
+        return False
 
-    print("[Interact] Could not find comment input")
-    return False
+    random_delay(0.3, 0.5)
+
+    # 3. Type the comment with natural speed
+    human_type(page, comment_text)
+    random_delay(0.5, 1.0)
+
+    # 4. Submit the comment
+    submitted = False
+
+    # 4A: Try DOM — find the comment submit button specifically
+    print("[Interact] [Comment] Submitting comment...")
+    try:
+        submit_selectors = [
+            'button.comments-comment-box__submit-button',
+            'button[class*="comments-comment-box"][type="submit"]',
+            'button[data-control-name="comment_submit"]',
+            'form.comments-comment-box button[type="submit"]',
+        ]
+        for selector in submit_selectors:
+            locator = page.locator(selector)
+            if locator.count() > 0:
+                bbox = locator.first.bounding_box()
+                if bbox and bbox["width"] > 5:
+                    cx = bbox["x"] + bbox["width"] / 2
+                    cy = bbox["y"] + bbox["height"] / 2
+                    print(f"[Interact] [Comment] ✅ Found submit button via DOM at ({cx:.0f},{cy:.0f})")
+                    human_click(page, cx, cy)
+                    submitted = True
+                    break
+    except Exception as e:
+        print(f"[Interact] [Comment] DOM submit search error: {e}")
+
+    # 4B: Ctrl+Enter — the most reliable way to submit a LinkedIn comment
+    if not submitted:
+        print("[Interact] [Comment] Using Ctrl+Enter to submit...")
+        page.keyboard.press("Control+Enter")
+        submitted = True
+
+    wait_for_stable(page, timeout=3000)
+
+    # 4C: Verify the comment was submitted by checking if the text input cleared
+    try:
+        # After a successful post, the comment input is usually cleared or collapsed
+        verify_selectors = [
+            '[role="textbox"][aria-label*="comment" i]',
+            '[contenteditable="true"][aria-label*="comment" i]',
+        ]
+        for selector in verify_selectors:
+            locator = page.locator(selector)
+            if locator.count() > 0:
+                content = locator.first.text_content() or ""
+                if comment_text[:20] in content:
+                    # Comment text is still there — submit might have failed
+                    print("[Interact] [Comment] ⚠️ Text still in input — retrying with Ctrl+Enter...")
+                    locator.first.focus()
+                    random_delay(0.2, 0.4)
+                    page.keyboard.press("Control+Enter")
+                    wait_for_stable(page, timeout=3000)
+                break
+    except Exception:
+        pass  # Verification is best-effort
+
+    print("[Interact] 💬 Comment posted!")
+    return True
 
 
 def find_recent_posts(page, profile_url=None):
@@ -464,7 +554,7 @@ def pre_connection_engagement(page, prospect_name, comment_generator=None):
     }
 
 
-def organic_feed_engagement(page, max_likes=3, max_comments=1, comment_generator=None):
+def organic_feed_engagement(page, max_likes=3, max_comments=1, comment_generator=None, guardrails=None):
     """Do organic feed engagement — like and comment on feed posts.
 
     Used during warm-up and regular sessions to build engagement
@@ -475,14 +565,21 @@ def organic_feed_engagement(page, max_likes=3, max_comments=1, comment_generator
         max_likes: Maximum posts to like.
         max_comments: Maximum posts to comment on.
         comment_generator: Optional function to generate comments.
+        guardrails: Optional Guardrails instance for rate limiting and stats tracking.
 
     Returns:
         dict: Summary of engagement actions.
     """
     likes = 0
     comments = 0
+    total_actions = max_likes + max_comments
 
-    for i in range(max_likes + max_comments + 2):
+    for i in range(total_actions + 3):  # Extra iterations for scroll/read variety
+        # Periodic session check
+        if not check_session_or_relogin(page):
+            print("[Interact] ❌ Session lost in engagement loop — aborting loop")
+            break
+
         # Scroll to next post
         human_scroll(page, "down", random.randint(300, 500))
         wait_for_stable(page, timeout=3000)
@@ -491,15 +588,35 @@ def organic_feed_engagement(page, max_likes=3, max_comments=1, comment_generator
         dwell_on_content(page, random.randint(40, 120))
 
         # Like?
-        if likes < max_likes and random.random() < 0.5:
-            if like_post(page, scroll_first=False):
-                likes += 1
+        if likes < max_likes and random.random() < 0.8:
+            if guardrails and not guardrails.can_like():
+                print("[Interact] ⛔ Daily like limit reached — skipping")
+            else:
+                # Scroll a little to ensure Like button is visible in viewport
+                human_scroll(page, "up", random.randint(50, 150))
+                wait_for_stable(page, timeout=1500)
+                if like_post(page, scroll_first=False):
+                    likes += 1
+                    if guardrails:
+                        guardrails.record_action("like")
+                    print(f"[Interact] 📊 Likes so far: {likes}/{max_likes}")
 
         # Comment?
-        if comments < max_comments and random.random() < 0.2 and comment_generator:
-            comment = comment_generator("general engagement")
-            if comment and comment_on_post(page, comment):
-                comments += 1
+        if comments < max_comments and random.random() < 0.5 and comment_generator:
+            if guardrails and not guardrails.can_comment():
+                print("[Interact] ⛔ Daily comment limit reached — skipping")
+            else:
+                comment = comment_generator("general engagement")
+                if comment and comment_on_post(page, comment):
+                    comments += 1
+                    if guardrails:
+                        guardrails.record_action("comment")
+                    print(f"[Interact] 📊 Comments so far: {comments}/{max_comments}")
+
+        # Stop early if all targets met
+        if likes >= max_likes and comments >= max_comments:
+            print(f"[Interact] ✅ All engagement targets met ({likes} likes, {comments} comments)")
+            break
 
         random_delay(1.0, 3.0)
 
