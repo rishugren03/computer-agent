@@ -22,6 +22,7 @@ from human import (
 from browser import wait_for_stable
 from accessibility import extract_act, find_buttons, find_textboxes, find_by_text
 from linkedin.auth import check_session_or_relogin
+from audit import audit_logger
 
 
 def _fast_click_like(page):
@@ -80,16 +81,32 @@ def _fast_click_like(page):
                   f"pos=({el['x']:.0f},{el['y']:.0f}) size={el['width']:.0f}x{el['height']:.0f}")
             print(f"[Interact]          classes='{el['classes']}'")
 
-        # Pick the first visible, not-already-liked button
+        # Pick the most central visible, not-already-liked button
+        valid_buttons = []
         for el in like_info:
+            label_lower = el.get("label", "").lower()
+            text_lower = el.get("text", "").lower()
+            
+            # Avoid already-liked states, or undo/remove buttons
+            if "liked" in label_lower or "remove" in label_lower or "undo" in label_lower:
+                continue
+            if "liked" in text_lower or "remove" in text_lower or "undo" in text_lower:
+                continue
+                
             if el["visible"] and el["pressed"] != "true" and el["width"] > 10:
-                cx, cy = el["x"], el["y"]
-                method_used = "DOM"
-                print(f"[Interact]   ✅ Selected: text='{el['text']}' at ({cx:.0f},{cy:.0f})")
-                break
+                valid_buttons.append(el)
+        
+        # Sort by proximity to vertical center (approx 400px) to avoid previous post buttons
+        valid_buttons.sort(key=lambda e: abs(e["y"] - 400))
+
+        if valid_buttons:
+            el = valid_buttons[0]
+            cx, cy = el["x"], el["y"]
+            method_used = "DOM"
+            print(f"[Interact]   ✅ Selected: text='{el['text']}' at ({cx:.0f},{cy:.0f})")
 
         if cx is None and like_info:
-            print("[Interact]   ⚠️ Found elements but none are visible/clickable")
+            print("[Interact]   ⚠️ Found elements but none are valid/clickable")
 
     except Exception as e:
         print(f"[Interact]   ❌ DOM search error: {e}")
@@ -291,6 +308,398 @@ def _fast_click_like(page):
     return reaction_clicked
 
 
+def read_post_in_viewport(page):
+    """Extract post content from the most visible post in the viewport.
+
+    Implements a 4-layer resilient extraction pipeline (DOM-first):
+      Layer 1: DOM — structured selectors + data-urn stripping (fast, free)
+      Layer 2: ACT — Accessibility Tree StaticText nodes (semantic, stable)
+      Layer 3: innerHTML — brute-force text extraction (catches edge cases)
+      Layer 4: Vision — Gemini screenshot analysis (expensive, last resort)
+
+    Returns:
+        dict: Structured post data with keys:
+            - body (str): The post text content
+            - author (str): Author name
+            - author_headline (str): Author headline/title
+            - topics (list[str]): Extracted hashtags/topics
+            - method (str): Which extraction layer succeeded
+            - confidence (float): 1.0=DOM, 0.7=ACT, 0.5=innerHTML, 0.3=Vision
+        Returns empty dict if all layers fail.
+    """
+    import os
+    from config import SCREENSHOT_DIR
+
+    empty_result = {}
+
+    try:
+        # ─── Step 0: Find the most visible post container ────────────
+        post_info = page.evaluate("""() => {
+            const articles = document.querySelectorAll(
+                'div[role="listitem"][componentkey*="FeedType"], article, .feed-shared-update-v2, [data-urn*="activity"]'
+            );
+            let bestIdx = -1;
+            let maxVisibleHeight = 0;
+
+            for (let i = 0; i < articles.length; i++) {
+                const el = articles[i];
+                const text = (el.innerText || '').toLowerCase();
+                
+                // Skip non-post containers like "People you may know" or "Recommended for you"
+                if (text.includes('people you may know') || text.includes('recommended for you')) {
+                    continue;
+                }
+                
+                // A valid post should have social action buttons like 'like' or 'comment'
+                if (!text.includes('like') && !text.includes('comment')) {
+                    continue;
+                }
+
+                const rect = el.getBoundingClientRect();
+                const visibleTop = Math.max(0, rect.top);
+                const visibleBottom = Math.min(window.innerHeight, rect.bottom);
+                const visibleHeight = visibleBottom - visibleTop;
+
+                if (visibleHeight > maxVisibleHeight) {
+                    maxVisibleHeight = visibleHeight;
+                    bestIdx = i;
+                }
+            }
+            return { idx: bestIdx, visibleHeight: maxVisibleHeight };
+        }""")
+
+        visible_article_idx = post_info.get("idx", -1)
+        if visible_article_idx == -1:
+            print("[Interact] ⚠️ No post container found in viewport.")
+            return empty_result
+
+        post_selector = 'div[role="listitem"][componentkey*="FeedType"], article, .feed-shared-update-v2, [data-urn*="activity"]'
+        post_locator = page.locator(post_selector).nth(visible_article_idx)
+
+        # ─── Step 1: Expand "See More" ──────────────────────────────
+        try:
+            see_more_variants = ["...see more", "…see more", "...more", "…more"]
+            for variant in see_more_variants:
+                see_more_btn = post_locator.get_by_text(variant, exact=True)
+                if see_more_btn.count() > 0 and see_more_btn.first.is_visible():
+                    print("[Interact] 👁️ Found 'more' button, clicking to expand post...")
+                    bbox = see_more_btn.first.bounding_box()
+                    if bbox:
+                        cx = bbox["x"] + bbox["width"] / 2
+                        cy = bbox["y"] + bbox["height"] / 2
+                        human_move_to(page, cx, cy)
+                        time.sleep(random.uniform(0.1, 0.3))
+                        human_click(page, cx, cy)
+                        time.sleep(0.5)
+                    break
+        except Exception as e:
+            print(f"[Interact] ⚠️ Error handling 'see more': {e}")
+
+        # ─── Step 2: Extract author metadata (always attempt) ───────
+        author_name = ""
+        author_headline = ""
+        try:
+            author_info = post_locator.evaluate("""(postEl) => {
+                const result = { name: '', headline: '' };
+
+                // Author name — usually a <span> inside an actor link
+                const actorName = postEl.querySelector(
+                    '.update-components-actor__name span[aria-hidden="true"], ' +
+                    '.feed-shared-actor__name span[aria-hidden="true"], ' +
+                    'a[data-tracking-control-name*="actor"] span[dir="ltr"] > span[aria-hidden="true"], ' +
+                    '.update-components-actor__title span[aria-hidden="true"]'
+                );
+                if (actorName) result.name = actorName.innerText.trim();
+
+                // Fallback: first strong/bold or prominent text element
+                if (!result.name) {
+                    const h3 = postEl.querySelector('h3, .t-bold');
+                    if (h3) result.name = h3.innerText.trim().split('\\n')[0];
+                }
+
+                // Author headline — description/subtitle below name
+                const actorDesc = postEl.querySelector(
+                    '.update-components-actor__description span[aria-hidden="true"], ' +
+                    '.feed-shared-actor__description span[aria-hidden="true"], ' +
+                    '.update-components-actor__sub-description span[aria-hidden="true"]'
+                );
+                if (actorDesc) result.headline = actorDesc.innerText.trim();
+
+                // Ultimate fallback for heavily obfuscated domains (like the new 2026 renderer)
+                if (!result.name) {
+                    const lines = (postEl.innerText || '').split('\\n')
+                        .map(l => l.trim())
+                        .filter(l => l.length > 0 && l !== 'Feed post' && l !== 'Suggested' && l !== 'Promoted');
+                    if (lines.length > 0) result.name = lines[0];
+                    if (lines.length > 1) result.headline = lines[1];
+                }
+
+                return result;
+            }""")
+            author_name = author_info.get("name", "")
+            author_headline = author_info.get("headline", "")
+            if author_name:
+                print(f"[Interact] 👤 Author: {author_name}" +
+                      (f" — {author_headline[:60]}" if author_headline else ""))
+        except Exception as e:
+            print(f"[Interact] ⚠️ Author extraction failed: {e}")
+
+        # ─── Variables for the extraction pipeline ──────────────────
+        post_text = ""
+        method_used = "None"
+        confidence = 0.0
+        topics = []
+        screenshot_path = None
+
+        # ─── Layer 1: DOM Content Extraction (Primary) ──────────────
+        print("[Interact] [1/4] 📄 DOM extraction...")
+        try:
+            dom_result = post_locator.evaluate("""(postEl) => {
+                // --- Helper: strip data-urn tracking divs ---
+                const clone = postEl.cloneNode(true);
+                clone.querySelectorAll('div[data-urn]').forEach(el => el.remove());
+
+                let text = '';
+                let method = '';
+
+                // Strategy A: feed-shared-text / update-components-text containers
+                const textContainers = clone.querySelectorAll(
+                    '.feed-shared-text, .update-components-text, ' +
+                    '.feed-shared-update-v2__description, ' +
+                    '[data-testid="expandable-text-box"]'
+                );
+                for (const container of textContainers) {
+                    const t = container.innerText?.trim() || '';
+                    if (t.length > text.length && t.length > 20) {
+                        text = t;
+                        method = 'DOM-TextContainer';
+                    }
+                }
+
+                // Strategy B: aria-hidden spans within text containers (LinkedIn's actual text rendering)
+                if (!text) {
+                    const spans = clone.querySelectorAll(
+                        '.feed-shared-text span[dir="ltr"], ' +
+                        '.update-components-text span[dir="ltr"], ' +
+                        'span.break-words'
+                    );
+                    const parts = [];
+                    for (const span of spans) {
+                        const t = span.innerText?.trim() || '';
+                        if (t.length > 5) parts.push(t);
+                    }
+                    if (parts.length > 0) {
+                        text = parts.join(' ');
+                        method = 'DOM-SpanCollect';
+                    }
+                }
+
+                // Strategy C: deepest substantial text node
+                if (!text) {
+                    const allEls = clone.querySelectorAll('span, p, div');
+                    let longestText = '';
+                    for (const el of allEls) {
+                        // Skip buttons, action bars, and navigation elements
+                        if (el.closest('button, [role="button"], nav, footer, header')) continue;
+                        const t = (el.innerText || el.textContent || '').trim();
+                        if (t.length > longestText.length && t.length > 30) {
+                            longestText = t;
+                        }
+                    }
+                    if (longestText) {
+                        text = longestText;
+                        method = 'DOM-DeepSearch';
+                    }
+                }
+
+                // Extract hashtags as topics
+                const hashtags = [];
+                const hashtagEls = clone.querySelectorAll('a[href*="hashtag"], button[data-hashtag]');
+                for (const ht of hashtagEls) {
+                    const tag = (ht.innerText || '').trim().replace('#', '');
+                    if (tag) hashtags.push(tag);
+                }
+
+                return { text: text, method: method, hashtags: hashtags };
+            }""")
+
+            if dom_result and dom_result.get("text"):
+                post_text = dom_result["text"].strip()
+                method_used = dom_result.get("method", "DOM")
+                confidence = 1.0
+                topics = dom_result.get("hashtags", [])
+                print(f"[Interact]   ✅ {method_used} extracted {len(post_text)} chars")
+
+        except Exception as e:
+            print(f"[Interact]   ❌ DOM extraction error: {e}")
+
+        # ─── Layer 2: ACT Tree Extraction (Secondary) ───────────────
+        if not post_text:
+            print("[Interact] [2/4] 🌳 ACT tree extraction...")
+            try:
+                from accessibility import extract_act, act_to_flat_list
+                tree = extract_act(page)
+                flat_nodes = act_to_flat_list(tree)
+
+                # Collect StaticText nodes that aren't UI labels
+                ui_labels = {
+                    "like", "comment", "share", "send", "repost",
+                    "follow", "connect", "more", "see more",
+                    "reactions", "comments", "reposts",
+                }
+                text_parts = []
+                for node in flat_nodes:
+                    if node.get("role") in ("StaticText", "text", "paragraph"):
+                        name = (node.get("name") or "").strip()
+                        if len(name) > 15 and name.lower() not in ui_labels:
+                            text_parts.append(name)
+
+                if text_parts:
+                    # Take the longest contiguous text block
+                    combined = " ".join(text_parts)
+                    if len(combined) > 30:
+                        post_text = combined
+                        method_used = "ACT"
+                        confidence = 0.7
+                        print(f"[Interact]   ✅ ACT extracted {len(post_text)} chars from {len(text_parts)} nodes")
+
+            except Exception as e:
+                print(f"[Interact]   ❌ ACT extraction error: {e}")
+
+        # ─── Layer 3: innerHTML Brute-Force (Tertiary) ──────────────
+        if not post_text:
+            print("[Interact] [3/4] 🔨 innerHTML brute-force extraction...")
+            try:
+                brute_text = post_locator.evaluate("""(postEl) => {
+                    const clone = postEl.cloneNode(true);
+
+                    // Strip all non-text elements
+                    const stripTags = ['button', 'svg', 'img', 'video', 'iframe',
+                                       'nav', 'footer', 'header', 'style', 'script'];
+                    stripTags.forEach(tag => {
+                        clone.querySelectorAll(tag).forEach(el => el.remove());
+                    });
+                    // Strip role="button" elements
+                    clone.querySelectorAll('[role="button"]').forEach(el => el.remove());
+                    // Strip data-urn tracking divs
+                    clone.querySelectorAll('div[data-urn]').forEach(el => el.remove());
+                    // Strip action bars
+                    clone.querySelectorAll(
+                        '.social-details-social-counts, .social-details-social-activity, ' + 
+                        '[class*="action-bar"], [class*="social-action"]'
+                    ).forEach(el => el.remove());
+
+                    const rawText = clone.textContent || '';
+
+                    // Filter out known UI patterns
+                    const uiPatterns = [
+                        /^\\s*Like\\s*$/im, /^\\s*Comment\\s*$/im, /^\\s*Share\\s*$/im,
+                        /^\\s*Send\\s*$/im, /^\\s*Repost\\s*$/im, /^\\s*Follow\\s*$/im,
+                        /^\\s*\\d+\\s*(reactions?|comments?|reposts?)\\s*$/im,
+                        /^\\s*\\d+[hdwmy]\\s*$/im,  // timestamps like "2h", "3d"
+                    ];
+
+                    // Split into lines, filter noise, rejoin
+                    const lines = rawText.split('\\n')
+                        .map(l => l.trim())
+                        .filter(l => l.length > 3)
+                        .filter(l => !uiPatterns.some(p => p.test(l)));
+
+                    return lines.join(' ').replace(/\\s+/g, ' ').trim();
+                }""")
+
+                if brute_text and len(brute_text) > 30:
+                    post_text = brute_text
+                    method_used = "innerHTML"
+                    confidence = 0.5
+                    print(f"[Interact]   ✅ innerHTML extracted {len(post_text)} chars")
+
+            except Exception as e:
+                print(f"[Interact]   ❌ innerHTML extraction error: {e}")
+
+        # ─── Layer 4: Vision Extraction (Last Resort) ───────────────
+        if not post_text:
+            print("[Interact] [4/4] 📸 Vision extraction (last resort)...")
+            try:
+                os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+                screenshot_path = os.path.join(SCREENSHOT_DIR, f"post_snippet_{int(time.time())}.png")
+                post_locator.screenshot(path=screenshot_path)
+                print(f"[Interact]   📸 Screenshot: {screenshot_path}")
+
+                from vision import analyze_image
+                prompt = (
+                    "Extract the main text content from this LinkedIn post screenshot.\n"
+                    "Ignore the author name, timestamps, reaction counts, and UI buttons.\n"
+                    "Return ONLY the post body text — the actual content the person wrote.\n"
+                    "If there are hashtags, include them at the end."
+                )
+
+                if screenshot_path and os.path.exists(screenshot_path):
+                    vision_text = analyze_image(screenshot_path, prompt)
+
+                    if vision_text and len(vision_text.strip()) > 20:
+                        post_text = vision_text.strip()
+                        method_used = "Vision"
+                        confidence = 0.3
+                        print(f"[Interact]   ✅ Vision extracted {len(post_text)} chars")
+                    else:
+                        print("[Interact]   ⚠️ Vision returned insufficient text.")
+            except Exception as e:
+                print(f"[Interact]   ❌ Vision extraction error: {e}")
+
+        # ─── Take screenshot for audit (if not already taken) ───────
+        if not screenshot_path:
+            try:
+                os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+                screenshot_path = os.path.join(SCREENSHOT_DIR, f"post_snippet_{int(time.time())}.png")
+                post_locator.screenshot(path=screenshot_path)
+            except Exception:
+                pass  # Non-critical
+
+        # ─── Extract topics from hashtags in body text ──────────────
+        if post_text and not topics:
+            import re
+            found_tags = re.findall(r'#(\w+)', post_text)
+            if found_tags:
+                topics = found_tags[:5]
+
+        # ─── Build structured result ────────────────────────────────
+        result = {}
+        if post_text:
+            result = {
+                "body": post_text,
+                "author": author_name,
+                "author_headline": author_headline,
+                "topics": topics,
+                "method": method_used,
+                "confidence": confidence,
+            }
+            print(f"[Interact] 📄 Post read via {method_used} (confidence={confidence}) | "
+                  f"{len(post_text)} chars | author='{author_name}'")
+        else:
+            print("[Interact] ❌ ALL 4 LAYERS FAILED — could not extract post content")
+
+        # Log to Audit Dashboard
+        audit_logger.log_event(
+            action_name="Read Post",
+            screenshot_path=screenshot_path,
+            extracted_text=post_text,
+            success=bool(post_text),
+            extra_data={
+                "method": method_used,
+                "confidence": confidence,
+                "author": author_name,
+            }
+        )
+
+        return result
+
+    except Exception as e:
+        print(f"[Interact] ❌ Error extracting post text: {e}")
+        audit_logger.log_event(action_name="Read Post", success=False, error_msg=str(e))
+        return empty_result
+
+
 def like_post(page, scroll_first=True):
     """Like the post currently in view.
 
@@ -309,13 +718,17 @@ def like_post(page, scroll_first=True):
         human_scroll(page, "down", random.randint(100, 200))
         wait_for_stable(page, timeout=2000)
 
-    # "Read" the post before liking (don't just spam likes)
+    # MANDATORY: Read the post before liking (Requirement: agent must read first)
+    post_data = read_post_in_viewport(page)
+    if not post_data:
+        print("[Interact] ⚠️ Could not read post content, proceeding with caution...")
+    
     dwell_on_content(page, random.randint(30, 120))
 
     return _fast_click_like(page)
 
 
-def comment_on_post(page, comment_text):
+def comment_on_post(page, comment_text, extracted_post_text=None):
     """Leave a comment on the post currently in view.
 
     Flow: Click "Comment" → Wait for input → Type comment → Post
@@ -324,11 +737,16 @@ def comment_on_post(page, comment_text):
     Args:
         page: Playwright page.
         comment_text: The comment to leave.
+        extracted_post_text: The original post text, used for audit logging.
 
     Returns:
         bool: True if comment was posted.
     """
-    # Read the post first (humans read before commenting)
+    # MANDATORY: Read the post first (Requirement: agent must read first)
+    if not extracted_post_text:
+        post_data = read_post_in_viewport(page)
+        extracted_post_text = post_data.get("body", "") if isinstance(post_data, dict) else post_data
+        
     dwell_on_content(page, random.randint(50, 150))
 
     # 1. Click the Comment button to open the comment input
@@ -408,34 +826,65 @@ def comment_on_post(page, comment_text):
 
     # 4. Submit the comment
     submitted = False
-
-    # 4A: Try DOM — find the comment submit button specifically
     print("[Interact] [Comment] Submitting comment...")
+
+    # 4A: Robust DOM check for the specific Post/Comment button
     try:
-        submit_selectors = [
-            'button.comments-comment-box__submit-button',
-            'button[class*="comments-comment-box"][type="submit"]',
-            'button[data-control-name="comment_submit"]',
-            'form.comments-comment-box button[type="submit"]',
-        ]
-        for selector in submit_selectors:
-            locator = page.locator(selector)
-            if locator.count() > 0:
-                bbox = locator.first.bounding_box()
-                if bbox and bbox["width"] > 5:
-                    cx = bbox["x"] + bbox["width"] / 2
-                    cy = bbox["y"] + bbox["height"] / 2
-                    print(f"[Interact] [Comment] ✅ Found submit button via DOM at ({cx:.0f},{cy:.0f})")
-                    human_click(page, cx, cy)
-                    submitted = True
-                    break
+        button_info = page.evaluate("""() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            // Filter all buttons that say "Comment" or "Post" and are NOT disabled
+            const submitBtns = btns.filter(b => {
+                const text = (b.innerText || '').trim().toLowerCase();
+                return (text === 'comment' || text === 'post') && !b.disabled;
+            });
+            
+            let bestBtn = null;
+            let maxScore = -100;
+            
+            for (const b of submitBtns) {
+                let score = 0;
+                const klass = (b.className || '').toLowerCase();
+                const hasSvg = b.querySelector('svg');
+                
+                // Real submit buttons are usually primary color (blue) and don't have SVGs
+                if (klass.includes('primary')) score += 50;
+                if (!hasSvg) score += 20; else score -= 50;
+                
+                // Favor buttons near or inside a comment box
+                if (b.closest('form, div[class*="comment-box"], div[class*="comments"], [class*="submit"]')) score += 30;
+                if (b.type === 'submit') score += 20;
+
+                const rect = b.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    if (score > maxScore) {
+                        maxScore = score;
+                        bestBtn = b;
+                    }
+                }
+            }
+            
+            if (bestBtn && maxScore > 0) {
+                const rect = bestBtn.getBoundingClientRect();
+                return {x: rect.x + rect.width/2, y: rect.y + rect.height/2, found: true, score: maxScore};
+            }
+            return {found: false};
+        }""")
+        
+        if button_info and button_info.get("found"):
+            cx, cy = button_info["x"], button_info["y"]
+            print(f"[Interact] [Comment] ✅ Found submit button via evaluated DOM at ({cx:.0f},{cy:.0f})")
+            human_click(page, cx, cy)
+            submitted = True
+            
     except Exception as e:
         print(f"[Interact] [Comment] DOM submit search error: {e}")
 
-    # 4B: Ctrl+Enter — the most reliable way to submit a LinkedIn comment
+    # 4B: Last resort fallback to Ctrl+Enter
     if not submitted:
-        print("[Interact] [Comment] Using Ctrl+Enter to submit...")
+        print("[Interact] [Comment] ⚠️ Submit button not found, falling back to Ctrl+Enter...")
         page.keyboard.press("Control+Enter")
+        random_delay(0.2, 0.4)
+        page.keyboard.press("Enter")
         submitted = True
 
     wait_for_stable(page, timeout=3000)
@@ -463,6 +912,14 @@ def comment_on_post(page, comment_text):
         pass  # Verification is best-effort
 
     print("[Interact] 💬 Comment posted!")
+    
+    audit_logger.log_event(
+        action_name="Comment on Post",
+        extracted_text=extracted_post_text, # To show what we responded to
+        generated_response=comment_text,
+        success=True
+    )
+    
     return True
 
 
@@ -514,8 +971,8 @@ def pre_connection_engagement(page, prospect_name, comment_generator=None):
     Args:
         page: Playwright page.
         prospect_name: Name of the prospect.
-        comment_generator: Function that generates a comment given post content.
-            Signature: (post_content: str) -> str
+        comment_generator: Function that generates a comment given post data.
+            Signature: (post_data: dict|str) -> str
             If None, just likes without commenting.
 
     Returns:
@@ -540,10 +997,19 @@ def pre_connection_engagement(page, prospect_name, comment_generator=None):
     # Generate and leave a comment if we have a generator
     commented = False
     if comment_generator and post_content:
-        comment = comment_generator(post_content)
+        # Build structured data for richer comment generation
+        post_data = {
+            "body": post_content,
+            "author": prospect_name,
+            "author_headline": "",
+            "topics": [],
+            "method": "profile_activity",
+            "confidence": 0.8,
+        }
+        comment = comment_generator(post_data)
         if comment:
             random_delay(1.0, 2.0)  # Pause before commenting (natural)
-            commented = comment_on_post(page, comment)
+            commented = comment_on_post(page, comment, post_content)
 
     return {
         "status": "engaged",
@@ -565,6 +1031,8 @@ def organic_feed_engagement(page, max_likes=3, max_comments=1, comment_generator
         max_likes: Maximum posts to like.
         max_comments: Maximum posts to comment on.
         comment_generator: Optional function to generate comments.
+            Signature: (post_data: dict) -> str
+            Receives structured post data with body, author, author_headline, topics.
         guardrails: Optional Guardrails instance for rate limiting and stats tracking.
 
     Returns:
@@ -584,7 +1052,19 @@ def organic_feed_engagement(page, max_likes=3, max_comments=1, comment_generator
         human_scroll(page, "down", random.randint(300, 500))
         wait_for_stable(page, timeout=3000)
 
-        # Read the post
+        # Read the post content (structured dict)
+        post_data = read_post_in_viewport(page)
+        post_body = post_data.get("body", "") if post_data else ""
+
+        # Retry once if extraction failed — scroll slightly and try again
+        if not post_body:
+            print("[Interact] 🔄 Retrying post extraction after small scroll...")
+            human_scroll(page, "down", random.randint(50, 100))
+            wait_for_stable(page, timeout=1500)
+            post_data = read_post_in_viewport(page)
+            post_body = post_data.get("body", "") if post_data else ""
+
+        # Dwell to simulate reading
         dwell_on_content(page, random.randint(40, 120))
 
         # Like?
@@ -605,9 +1085,12 @@ def organic_feed_engagement(page, max_likes=3, max_comments=1, comment_generator
         if comments < max_comments and random.random() < 0.5 and comment_generator:
             if guardrails and not guardrails.can_comment():
                 print("[Interact] ⛔ Daily comment limit reached — skipping")
+            elif not post_body:
+                print("[Interact] ⚠️ Could not read post text — skipping comment to avoid generic repetitive comments")
             else:
-                comment = comment_generator("general engagement")
-                if comment and comment_on_post(page, comment):
+                # Pass full structured post data for richer comment generation
+                comment = comment_generator(post_data)
+                if comment and comment_on_post(page, comment, post_body):
                     comments += 1
                     if guardrails:
                         guardrails.record_action("comment")

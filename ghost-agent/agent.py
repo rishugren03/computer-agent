@@ -151,7 +151,12 @@ def run_agent(prospects=None, continuous=False):
                 page,
                 max_likes=random.randint(2, 4),
                 max_comments=random.randint(1, 2),
-                comment_generator=lambda content: generate_comment(content, persona),
+                comment_generator=lambda post_data: generate_comment(
+                    post_data.get("body", post_data) if isinstance(post_data, dict) else post_data,
+                    persona,
+                    author_name=post_data.get("author") if isinstance(post_data, dict) else None,
+                    author_headline=post_data.get("author_headline") if isinstance(post_data, dict) else None,
+                ),
                 guardrails=guardrails,
             )
 

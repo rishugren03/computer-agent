@@ -64,7 +64,7 @@ Return ONLY the connection note text. No quotes, no explanation."""
     return _generate_text(prompt, max_tokens=150)
 
 
-def generate_comment(post_content, persona=None):
+def generate_comment(post_content, persona=None, author_name=None, author_headline=None):
     """Generate a context-aware comment on a LinkedIn post.
 
     Creates a thoughtful, genuine comment that adds value
@@ -73,13 +73,22 @@ def generate_comment(post_content, persona=None):
     Args:
         post_content: The text of the post to comment on.
         persona: PersonaProfile for style matching.
+        author_name: Optional author name for personalized comments.
+        author_headline: Optional author headline/role for contextual comments.
 
     Returns:
         str: Comment text.
     """
     persona_desc = persona.to_prompt_description() if persona else "Professional, friendly tone."
 
-    prompt = f"""Write a LinkedIn comment on this post:
+    # Build author context if available
+    author_ctx = ""
+    if author_name:
+        author_ctx = f" by {author_name}"
+        if author_headline:
+            author_ctx += f" ({author_headline})"
+
+    prompt = f"""Write a LinkedIn comment on this post{author_ctx}:
 
 "{post_content[:500]}"
 
@@ -92,6 +101,7 @@ Rules:
 4. Sound natural and human
 5. Match the writing style described above
 6. Don't try to sell anything or pitch
+7. If you know the author's name, you may reference them naturally (but don't force it)
 
 Return ONLY the comment text. No quotes, no explanation."""
 
