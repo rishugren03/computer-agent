@@ -66,7 +66,7 @@ def _fast_click_like(page):
                         y: rect.y + rect.height / 2,
                         width: rect.width,
                         height: rect.height,
-                        visible: rect.width > 0 && rect.height > 0 && rect.top > 0 && rect.top < window.innerHeight,
+                        visible: rect.width > 0 && rect.height > 0 && rect.top > 80 && rect.bottom < window.innerHeight - 20,
                     });
                 }
             }
@@ -181,16 +181,8 @@ def _fast_click_like(page):
 
     print(f"[Interact] ── Clicking Like via {method_used} at ({cx:.0f},{cy:.0f}) ──")
 
-    # ─── Step 2: Hover with Bézier (triggers reaction popup) ──────────
-    print("[Interact] Moving to Like button with Bézier curve...")
-    human_move_to(page, cx, cy)
-
-    # ─── Step 3: Wait for reaction popup ──────────────────────────────
-    wait_time = random.uniform(0.6, 0.9)
-    print(f"[Interact] Waiting {wait_time:.2f}s for reaction popup...")
-    time.sleep(wait_time)
-
-    # ─── Step 4: Click a reaction emoji from the popup ────────────────
+    # If the intent is just a normal "Like" (thumbs up), click it directly without the wait
+    # The LinkedIn thumbs-up reaction triggers from a standard click, avoiding the popup UI altogether.
     reaction_names = ["Like", "Celebrate", "Support", "Love", "Insightful", "Funny"]
 
     if random.random() < 0.8:
@@ -198,6 +190,27 @@ def _fast_click_like(page):
     else:
         target_reaction = random.choice(reaction_names)
     print(f"[Interact] Target reaction: {target_reaction}")
+
+    if target_reaction == "Like":
+        print("[Interact] Moving to Like button with Bézier curve and clicking immediately...")
+        human_move_to(page, cx, cy)
+        time.sleep(random.uniform(0.6, 1.2))
+        page.mouse.click(cx, cy, delay=random.randint(50, 150))
+        print("[Interact] 👍 Clicked Like directly")
+        print(f"[Interact] ── Like Complete (method={method_used}, reaction=True) ──")
+        return True
+
+    # ─── Step 2: Hover with Bézier (triggers reaction popup for non-Like reactions) ───
+    print(f"[Interact] Moving to Like button with Bézier curve to trigger popup for {target_reaction}...")
+    human_move_to(page, cx, cy)
+
+    # ─── Step 3: Wait for reaction popup ──────────────────────────────
+    # Wait lightly longer to ensure popup fully renders before looking for it
+    wait_time = random.uniform(1.0, 1.5)
+    print(f"[Interact] Waiting {wait_time:.2f}s for reaction popup...")
+    time.sleep(wait_time)
+
+    # ─── Step 4: Click a reaction emoji from the popup ────────────────
 
     reaction_clicked = False
 
@@ -700,7 +713,7 @@ def read_post_in_viewport(page):
         return empty_result
 
 
-def like_post(page, scroll_first=True):
+def like_post(page, scroll_first=True, post_data=None):
     """Like the post currently in view.
 
     LinkedIn-specific: The Like button shows a reaction emoji popup
@@ -710,6 +723,7 @@ def like_post(page, scroll_first=True):
     Args:
         page: Playwright page.
         scroll_first: If True, scroll down a bit before liking.
+        post_data: Optional existing extracted post data.
 
     Returns:
         bool: True if like was successful.
@@ -719,7 +733,9 @@ def like_post(page, scroll_first=True):
         wait_for_stable(page, timeout=2000)
 
     # MANDATORY: Read the post before liking (Requirement: agent must read first)
-    post_data = read_post_in_viewport(page)
+    if not post_data:
+        post_data = read_post_in_viewport(page)
+        
     if not post_data:
         print("[Interact] ⚠️ Could not read post content, proceeding with caution...")
     
@@ -992,7 +1008,15 @@ def pre_connection_engagement(page, prospect_name, comment_generator=None):
     post_content = post.get("content", "")
 
     # Like the post
-    liked = like_post(page, scroll_first=False)
+    post_data = {
+        "body": post_content,
+        "author": prospect_name,
+        "author_headline": "",
+        "topics": [],
+        "method": "profile_activity",
+        "confidence": 0.8,
+    }
+    liked = like_post(page, scroll_first=False, post_data=post_data)
 
     # Generate and leave a comment if we have a generator
     commented = False
@@ -1041,6 +1065,7 @@ def organic_feed_engagement(page, max_likes=3, max_comments=1, comment_generator
     likes = 0
     comments = 0
     total_actions = max_likes + max_comments
+    seen_posts = set()
 
     for i in range(total_actions + 3):  # Extra iterations for scroll/read variety
         # Periodic session check
@@ -1064,6 +1089,20 @@ def organic_feed_engagement(page, max_likes=3, max_comments=1, comment_generator
             post_data = read_post_in_viewport(page)
             post_body = post_data.get("body", "") if post_data else ""
 
+        # Check if we've already engaged with this post snippet
+        # Use first 200 chars as a fuzzy signature
+        post_signature = post_body[:200] if post_body else None
+        
+        if post_signature and post_signature in seen_posts:
+            print("[Interact] ⏭️ Already processed this post in the current session feed — scrolling further")
+            # Force a slightly larger scroll to move past this post
+            human_scroll(page, "down", random.randint(400, 700))
+            random_delay(1.0, 2.0)
+            continue
+            
+        if post_signature:
+            seen_posts.add(post_signature)
+
         # Dwell to simulate reading
         dwell_on_content(page, random.randint(40, 120))
 
@@ -1072,10 +1111,10 @@ def organic_feed_engagement(page, max_likes=3, max_comments=1, comment_generator
             if guardrails and not guardrails.can_like():
                 print("[Interact] ⛔ Daily like limit reached — skipping")
             else:
-                # Scroll a little to ensure Like button is visible in viewport
-                human_scroll(page, "up", random.randint(50, 150))
+                # Scroll a little down to ensure Like button is visible in viewport
+                human_scroll(page, "down", random.randint(50, 150))
                 wait_for_stable(page, timeout=1500)
-                if like_post(page, scroll_first=False):
+                if like_post(page, scroll_first=False, post_data=post_data):
                     likes += 1
                     if guardrails:
                         guardrails.record_action("like")
