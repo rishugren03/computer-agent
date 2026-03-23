@@ -1,0 +1,16 @@
+
+    <!DOCTYPE html>
+    <html>
+    <head><title>Test Self-Healing</title></head>
+    <body>
+      <h1>Self-Healing Test</h1>
+      <button id="real-button-123" class="btn-primary">Click Me (Connect)</button>
+      <script>
+        document.getElementById('real-button-123').onclick = () => {
+          console.log('Button Clicked!');
+          document.body.innerHTML += '<p id="success">Success!</p>';
+        };
+      </script>
+    </body>
+    </html>
+  

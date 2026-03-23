@@ -11,6 +11,11 @@ checking LinkedIn during a work break.
 
 import random
 import time
+import sys
+import os
+
+# Add local directory to sys.path for IDEs and static analysis
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from human import (
     human_click,
@@ -25,6 +30,7 @@ from browser import take_screenshot, wait_for_stable
 from accessibility import extract_act, find_buttons, find_links, find_textboxes
 from config import DETOUR_PROBABILITY, SCREENSHOT_DIR
 from semantic_map import SemanticMap
+from self_healing_bridge import heal_selector
 
 # Module-level semantic cache singleton
 _smap = SemanticMap()
@@ -270,6 +276,12 @@ def _click_cached_or_discover(page, label, role, name, discover_fn):
         c_role = cached.get("role", role)
         c_name = cached.get("name", name)
         try:
+            # Direct selector handling (healed elements)
+            if c_role == "selector":
+                print(f"[Navigator] ⚡ Cache hit (Direct Selector): '{label}' → {c_name}")
+                page.click(c_name, timeout=5000)
+                return True
+
             locator = page.get_by_role(c_role, name=c_name)
             if locator.count() > 0:
                 bbox = locator.first.bounding_box()
@@ -299,6 +311,34 @@ def _click_cached_or_discover(page, label, role, name, discover_fn):
         _click_act_element(page, element)
         return True
 
+    # 3. Last Resort: Self-Healing via LLM (Gemini)
+    print(f"[Navigator] ⚠️ Discovery failed for '{label}' — triggering self-healing...")
+    html_content = page.content()
+    # Construct intent from role and name
+    intent = f"Click the {name} {role}"
+    
+    healing_result = heal_selector(intent, html_content)
+    
+    if healing_result.get("status") == "fixed" and healing_result.get("newSelector"):
+        new_selector = healing_result["newSelector"]
+        print(f"[Navigator] 🩹 Self-healing found new selector: {new_selector}")
+        
+        try:
+            # Attempt to click with the new selector
+            page.click(new_selector, timeout=5000)
+            print(f"[Navigator] ✅ Self-healing success! Updating cache for '{label}'")
+            
+            # Store the new selector (as a direct selector if possible, or mapping to dummy role/name)
+            # For now, we store the new selector as a special type if SemanticMap supports it
+            # Or just store it as name for lookup
+            _smap.store(label, {
+                "role": "selector", # Special role to indicate direct click
+                "name": new_selector,
+            })
+            return True
+        except Exception as e:
+            print(f"[Navigator] ❌ Retry click failed: {e}")
+            
     return False
 
 

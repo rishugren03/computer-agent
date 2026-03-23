@@ -1,0 +1,12 @@
+{
+  "venvPath": "ghost-agent",
+  "venv": "venv",
+  "extraPaths": [
+    "ghost-agent"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "ghost-agent"
+    }
+  ]
+}
