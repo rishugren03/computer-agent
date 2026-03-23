@@ -388,3 +388,6 @@ def dwell_on_content(page, word_count):
     """Simulate a human reading content: idle fidget for reading_delay duration."""
     delay = reading_delay(word_count)
     idle_fidget(page, delay)
+
+# Antigravity Specific Alias
+smooth_move_and_click = human_click

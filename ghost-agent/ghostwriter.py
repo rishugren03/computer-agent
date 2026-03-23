@@ -12,10 +12,10 @@ Uses DeepSeek for text generation with persona-aware prompts.
 import json
 import time
 
-from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
-from openai import OpenAI
+from config import GEMINI_API_KEY, GEMINI_PRO_MODEL
+from google import genai
 
-client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 MAX_RETRIES = 3
 
@@ -218,20 +218,13 @@ def _generate_text(prompt, max_tokens=200):
     """
     for attempt in range(MAX_RETRIES):
         try:
-            response = client.chat.completions.create(
-                model=DEEPSEEK_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a writing assistant that generates natural, human-sounding LinkedIn messages. Always match the specified writing style exactly."
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=max_tokens,
-                temperature=0.7,
+            prompt_content = f"You are a writing assistant that generates natural, human-sounding LinkedIn messages. Always match the specified writing style exactly.\n\n{prompt}"
+            response = client.models.generate_content(
+                model=GEMINI_PRO_MODEL,
+                contents=prompt_content,
             )
 
-            text = response.choices[0].message.content.strip()
+            text = response.text.strip()
 
             # Clean up: remove surrounding quotes if present
             if (text.startswith('"') and text.endswith('"')) or \

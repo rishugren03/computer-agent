@@ -88,6 +88,8 @@ def open_browser(url="https://www.linkedin.com"):
             "latitude": USER_LATITUDE,
             "longitude": USER_LONGITUDE,
         },
+        "bypass_csp": True,
+        "ignore_https_errors": True,
     }
 
     # Add proxy if configured
@@ -177,20 +179,18 @@ def take_screenshot(page, path=None):
 
 
 def wait_for_stable(page, timeout=5000):
-    """Wait for the page to become stable (network idle + DOM settle).
-
-    Uses a two-phase approach:
-    1. Wait for network idle (or timeout gracefully)
-    2. Brief additional wait for JS rendering
+    """Wait for the page to become somewhat stable (fast execution).
+    
+    Speculative Execution: We wait for 'commit' rather than 'networkidle'
+    to allow the vision agent to start acting before fully rendering.
     """
     try:
-        page.wait_for_load_state("networkidle", timeout=timeout)
+        page.wait_for_load_state("commit", timeout=timeout)
     except Exception:
-        # Network didn't go idle (long-polling, websockets) — just wait briefly
-        time.sleep(1.5)
-
-    # Brief additional wait for any JS rendering to complete
-    time.sleep(random.uniform(0.3, 0.8))
+        pass
+        
+    # Micro-wait for any JS rendering to start
+    time.sleep(random.uniform(0.1, 0.3))
 
 
 def get_current_url(page):
