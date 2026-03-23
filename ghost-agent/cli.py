@@ -193,6 +193,53 @@ def cmd_setup(args):
     print("    Finally 'python cli.py run' to start outreach!")
 
 
+def cmd_test_search(args):
+    """Test the search and people tab navigation."""
+    from browser import open_browser, close_browser, wait_for_stable
+    from linkedin.auth import ensure_session, wait_for_login, is_logged_in
+    from navigator import navigate_to_search, _click_people_tab
+
+    if not args:
+        print("❌ Please provide a name to search for. Example: python cli.py test_search \"John Doe\"")
+        return
+
+    query = " ".join(args)
+    print(f"🔍 Testing search functionality for: {query}")
+
+    page, context, playwright = open_browser("https://www.linkedin.com/feed/")
+    wait_for_stable(page, timeout=10000)
+
+    try:
+        if not is_logged_in(page):
+            print("⚠️ Not logged in. Waiting for manual login...")
+            logged_in = wait_for_login(page)
+            if not logged_in:
+                print("❌ Could not log in")
+                return
+
+        if not ensure_session(page):
+            print("❌ Session issue")
+            return
+
+        print("✅ Logged in. Testing search...")
+        navigate_to_search(page, query)
+        
+        print("✅ Search complete. Testing People tab...")
+        _click_people_tab(page)
+        
+        print("🎉 Test complete! Browser will remain open for 15 seconds to inspect.")
+        import time
+        time.sleep(15)
+
+    except Exception as e:
+        print(f"❌ Error during test: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print("🧹 Cleaning up browser...")
+        close_browser(context, playwright)
+
+
 def cmd_help(args=None):
     """Print help message."""
     print("""
@@ -205,11 +252,13 @@ Commands:
   python cli.py review             Review pending connection notes
   python cli.py stats              Show daily/weekly statistics
   python cli.py warmup             Manually trigger a warm-up session
+  python cli.py test_search "Name" Test the search functionality isolated
   python cli.py help               Show this help message
 
 Examples:
   python cli.py setup
   python cli.py warmup
+  python cli.py test_search "Utkarsh Kumar Bakhtiyarpur"
   python cli.py run "John Doe" "Jane Smith"
   python cli.py run -c
   python cli.py review
@@ -223,6 +272,7 @@ COMMANDS = {
     "stats": cmd_stats,
     "warmup": cmd_warmup,
     "setup": cmd_setup,
+    "test_search": cmd_test_search,
     "help": cmd_help,
 }
 

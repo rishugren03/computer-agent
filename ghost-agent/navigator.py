@@ -57,56 +57,56 @@ def navigate_to_feed(page):
 
 
 def navigate_to_search(page, query):
-    """Search LinkedIn using the search bar (never direct URL).
+    """Search LinkedIn using the search bar naturally, with a reliable URL fallback.
 
     Simulates: Click search → Type query → Press Enter
     Then waits for results naturally.
     """
     print(f"[Navigator] Searching for: {query}")
+    import urllib.parse
 
-    # For LinkedIn search, the input is often a combobox, searchbox, or textbox.
-    # We tell it to discover textboxes (which includes searchbox).
-    clicked = _click_cached_or_discover(page, "search_input", "textbox", "Search", find_textboxes)
+    success = False
+    
+    # 1. High-level reliable locators for LinkedIn search bar
+    locators = [
+        page.locator("input.search-global-typeahead__input"),
+        page.get_by_placeholder("Search", exact=False),
+        page.get_by_role("combobox", name="Search", exact=False),
+        page.get_by_role("searchbox", name="Search", exact=False)
+    ]
+    
+    # Try semantic map first if available
+    cached = _smap.lookup("search_input")
+    if cached and cached.get("role") == "selector":
+        locators.insert(0, page.locator(cached.get("name")))
 
-    if clicked:
-        random_delay(0.3, 0.6)
-        # Ensure we have focus! Playwright sometimes loses focus with synthetic mouse clicks.
+    for loc in locators:
         try:
-            # Fallback to direct locator to ensure focus
-            locators = [
-                page.get_by_role("combobox", name="Search", exact=False),
-                page.get_by_role("searchbox", name="Search", exact=False),
-                page.get_by_role("textbox", name="Search", exact=False),
-                page.get_by_placeholder("Search", exact=False)
-            ]
-            for loc in locators:
-                if loc.count() > 0:
-                    # click with force instead of soft focus to ensure it's active
-                    loc.first.click(timeout=2000)
-                    break
-        except Exception as e:
-            print(f"[Navigator] Warning: Could not explicitly focus search box: {e}")
+            # Only interact with a visible search input avoiding the hidden mobile bar
+            visible_input = loc.filter(state="visible").first
+            # Expect it to appear quickly if it is the right one
+            visible_input.wait_for(state="visible", timeout=1000)
             
-        # Clear existing text and type new query
-        page.keyboard.press("Control+a")
-        random_delay(0.1, 0.2)
-        page.keyboard.press("Backspace")
-        random_delay(0.1, 0.2)
-        
-        human_type(page, query)
-        random_delay(0.4, 0.8)
-        page.keyboard.press("Enter")
-    else:
-        # Fallback: try clicking the search area by expected position
-        human_click(page, 450, 25)  # Search bar is typically near top-center
-        random_delay(0.5, 0.8)
-        page.keyboard.press("Control+a")
-        random_delay(0.1, 0.2)
-        page.keyboard.press("Backspace")
-        random_delay(0.1, 0.2)
-        human_type(page, query)
-        random_delay(0.4, 0.8)
-        page.keyboard.press("Enter")
+            print("[Navigator] Found visible search input, clicking and typing...")
+            visible_input.click(timeout=1000)
+            visible_input.fill("") # Clear reliably
+            
+            # Type organically but bind exactly to this element so we never type into the void
+            delay_ms = random.randint(30, 90)
+            visible_input.type(query, delay=delay_ms)
+            
+            random_delay(0.2, 0.5)
+            visible_input.press("Enter")
+            success = True
+            break
+        except Exception:
+            continue
+            
+    # 2. Most reliable fallback: navigate to search URI directly if UI changes drastically
+    if not success:
+        print("[Navigator] ⚠️ Organic search failed. Using highly reliable URL fallback...")
+        encoded_query = urllib.parse.quote(query)
+        page.goto(f"https://www.linkedin.com/search/results/all/?keywords={encoded_query}", wait_until="domcontentloaded")
 
     wait_for_stable(page, timeout=8000)
     random_delay(1.0, 2.0)
@@ -260,15 +260,53 @@ def _try_like_current_post(page):
 
 def _click_people_tab(page):
     """Click the 'People' tab in search results."""
+    import re
     try:
-        if not _click_cached_or_discover(page, "search_tab_people", "button", "People", find_buttons):
-            # Try links too
-            if not _click_cached_or_discover(page, "search_tab_people", "link", "People", find_links):
-                print("[Navigator] Could not find People tab")
+        # Give page a tiny bit of extra time to render search results
+        page.wait_for_timeout(2000)
+
+        # 1. Try direct Playwright locators for common LinkedIn tab structures
+        locators = [
+            page.locator("button.search-reusables__filter-pill-button").filter(has_text=re.compile(r"^\s*People\s*$", re.IGNORECASE)),
+            page.locator("button.artdeco-pill").filter(has_text=re.compile(r"^\s*People\s*$", re.IGNORECASE)),
+            page.get_by_role("button", name=re.compile(r"^\s*People\s*$", re.IGNORECASE)),
+            page.get_by_role("link", name=re.compile(r"^\s*People\s*$", re.IGNORECASE)),
+            page.locator("xpath=//button[normalize-space()='People']"),
+            page.locator("xpath=//a[normalize-space()='People']")
+        ]
+        
+        for loc in locators:
+            try:
+                # Wait briefly for this specific locator to appear (1.5s per locator)
+                loc.first.wait_for(state="visible", timeout=1500)
+                print(f"[Navigator] Clicking People tab via direct DOM locator...")
+                loc.first.click(timeout=3000)
+                wait_for_stable(page)
                 return
-        wait_for_stable(page)
+            except Exception:
+                continue
+
+        # 2. Fallback: High-level most reliable URL navigation if DOM clicking fails
+        print("[Navigator] Direct locators failed. Using highly reliable URL fallback for People tab...")
+        
+        # Extract the query from the current URL if possible
+        current_url = page.url
+        import urllib.parse
+        query = ""
+        if "keywords=" in current_url:
+            try:
+                query = current_url.split("keywords=")[1].split("&")[0]
+            except Exception:
+                pass
+                
+        if query:
+            print(f"[Navigator] Reliable query parsed: {urllib.parse.unquote(query)}")
+            page.goto(f"https://www.linkedin.com/search/results/people/?keywords={query}", wait_until="domcontentloaded")
+            wait_for_stable(page)
+        else:
+            print("[Navigator] Could not parse query for URL fallback.")
     except Exception as e:
-        print(f"[Navigator] Error clicking People tab: {e}")
+        print(f"[Navigator] Error navigating to People tab: {e}")
 
 
 # ─── SemanticMap-Accelerated Element Interaction ─────────────────────────────
