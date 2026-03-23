@@ -45,8 +45,9 @@ def _fast_click_like(page):
         like_info = page.evaluate("""() => {
             const results = [];
 
-            // Scan ALL buttons and roles
-            const allEls = document.querySelectorAll('button, [role="button"], span[class*="reaction"], div[class*="reaction"]');
+            // Scan ALL buttons and roles within the active post (or document fallback)
+            const container = document.querySelector('[data-ghost-active-post="true"]') || document;
+            const allEls = container.querySelectorAll('button, [role="button"], span[class*="reaction"], div[class*="reaction"]');
 
             for (const el of allEls) {
                 const text = (el.innerText || '').trim();
@@ -66,7 +67,7 @@ def _fast_click_like(page):
                         y: rect.y + rect.height / 2,
                         width: rect.width,
                         height: rect.height,
-                        visible: rect.width > 0 && rect.height > 0 && rect.top > 80 && rect.bottom < window.innerHeight - 20,
+                        visible: rect.width > 0 && rect.height > 0, // removed viewport constraint so it finds off-screen buttons inside active post
                     });
                 }
             }
@@ -115,7 +116,10 @@ def _fast_click_like(page):
     if cx is None:
         print("[Interact] [2/4] Trying Playwright role locator...")
         try:
-            locator = page.get_by_role("button", name="Like", exact=True)
+            import re
+            loc_path = '[data-ghost-active-post="true"]'
+            base = page.locator(loc_path).first if page.locator(loc_path).count() > 0 else page
+            locator = base.get_by_role("button", name=re.compile("Like", re.IGNORECASE))
             count = locator.count()
             print(f"[Interact]   Found {count} elements with role=button, name='Like'")
             if count > 0:
@@ -378,6 +382,13 @@ def read_post_in_viewport(page):
                     bestIdx = i;
                 }
             }
+            
+            // Mark the chosen post to scope future interactions
+            if (bestIdx >= 0) {
+                articles.forEach(a => a.removeAttribute('data-ghost-active-post'));
+                articles[bestIdx].setAttribute('data-ghost-active-post', 'true');
+            }
+            
             return { idx: bestIdx, visibleHeight: maxVisibleHeight };
         }""")
 
@@ -766,14 +777,51 @@ def comment_on_post(page, comment_text, extracted_post_text=None):
     dwell_on_content(page, random.randint(50, 150))
 
     # 1. Click the Comment button to open the comment input
-    tree = extract_act(page)
-    comment_buttons = find_buttons(tree, "Comment")
+    print("[Interact] [Comment] Step 1: Searching for 'Comment' button to open input...")
+    comment_opened = False
+    
+    # 1A: Playwright selector (Robust, auto-scrolls)
+    try:
+        import re
+        loc_path = '[data-ghost-active-post="true"]'
+        base = page.locator(loc_path).first if page.locator(loc_path).count() > 0 else page
+        
+        # Get by role is much more resilient than class names
+        btn_locator = base.get_by_role("button", name=re.compile("Comment", re.IGNORECASE))
+        if btn_locator.count() > 0:
+            btn_locator.first.click()
+            print("[Interact] [Comment] ✅ Opened via scoped get_by_role")
+            comment_opened = True
+        else:
+            locators = [
+                '[data-ghost-active-post="true"] button:has-text("Comment"):visible',
+                'button:has-text("Comment"):visible',
+            ]
+            for sel in locators:
+                elements = page.locator(sel)
+                for i in range(elements.count()):
+                    btn = elements.nth(i)
+                    btn.click()
+                    print(f"[Interact] [Comment] ✅ Opened via locator {sel}")
+                    comment_opened = True
+                    break
+                if comment_opened:
+                    break
+    except Exception as e:
+        print(f"[Interact] [Comment] Playwright open error: {e}")
 
-    if not comment_buttons:
-        print("[Interact] Could not find Comment button")
-        return False
+    # 1B: Fallback to ACT (previous method)
+    if not comment_opened:
+        tree = extract_act(page)
+        comment_buttons = find_buttons(tree, "Comment")
 
-    from navigator import _click_act_element
+        if not comment_buttons:
+            print("[Interact] Could not find Comment button")
+            return False
+
+        from navigator import _click_act_element
+        _click_act_element(page, comment_buttons[0])
+        print("[Interact] [Comment] ✅ Opened via ACT")
     _click_act_element(page, comment_buttons[0])
     random_delay(0.8, 1.5)
     wait_for_stable(page, timeout=3000)
@@ -786,22 +834,32 @@ def comment_on_post(page, comment_text, extracted_post_text=None):
     try:
         # LinkedIn comment boxes are contenteditable divs with specific ARIA labels
         selectors = [
+            '[data-ghost-active-post="true"] [role="textbox"][aria-label*="comment" i]',
+            '[data-ghost-active-post="true"] [role="textbox"][aria-placeholder*="comment" i]',
+            '[data-ghost-active-post="true"] [contenteditable="true"][aria-label*="comment" i]',
+            '[data-ghost-active-post="true"] .ql-editor[contenteditable="true"]',
+            '[data-ghost-active-post="true"] [role="textbox"][aria-label*="Add a comment" i]',
+            '[data-ghost-active-post="true"] div.editor-content[contenteditable="true"]',
+            # Fallbacks:
             '[role="textbox"][aria-label*="comment" i]',
             '[role="textbox"][aria-placeholder*="comment" i]',
             '[contenteditable="true"][aria-label*="comment" i]',
-            '.ql-editor[contenteditable="true"]',
-            '[role="textbox"][aria-label*="Add a comment" i]',
-            'div.editor-content[contenteditable="true"]',
         ]
         for selector in selectors:
             locator = page.locator(selector)
             if locator.count() > 0:
-                bbox = locator.first.bounding_box()
+                first_input = locator.first
+                first_input.scroll_into_view_if_needed()
+                bbox = first_input.bounding_box()
                 if bbox and bbox["width"] > 10 and bbox["height"] > 5:
                     cx = bbox["x"] + bbox["width"] / 2
                     cy = bbox["y"] + bbox["height"] / 2
                     print(f"[Interact] [Comment] ✅ DOM found comment input at ({cx:.0f},{cy:.0f}) via '{selector}'")
-                    human_click(page, cx, cy)
+                    if cy < 0 or ("height" in page.viewport_size and cy > page.viewport_size["height"]):
+                        print("[Interact] [Comment] ⚠️ Auto-scroll failed. Using Playwright click.")
+                        first_input.click()
+                    else:
+                        human_click(page, cx, cy)
                     comment_input_found = True
                     break
     except Exception as e:
@@ -844,99 +902,209 @@ def comment_on_post(page, comment_text, extracted_post_text=None):
     submitted = False
     print("[Interact] [Comment] Submitting comment...")
 
-    # 4A: Robust DOM check for the specific Post/Comment button
-    try:
-        button_info = page.evaluate("""() => {
-            const btns = Array.from(document.querySelectorAll('button'));
-            // Filter all buttons that say "Comment" or "Post" and are NOT disabled
-            const submitBtns = btns.filter(b => {
-                const text = (b.innerText || '').trim().toLowerCase();
-                return (text === 'comment' || text === 'post') && !b.disabled;
-            });
+    # 4A, 4B, 4C: Retry loop to find and click Submit button
+    # (Button is often disabled immediately after typing due to React state)
+    for attempt in range(4):
+        if submitted:
+            break
             
-            let bestBtn = null;
-            let maxScore = -100;
-            
-            for (const b of submitBtns) {
-                let score = 0;
-                const klass = (b.className || '').toLowerCase();
-                const hasSvg = b.querySelector('svg');
+        print(f"[Interact] [Comment] Submit attempt {attempt + 1}/4...")
+        
+        # 4A: Robust DOM check for the specific Post/Comment button
+        try:
+            button_info = page.evaluate("""() => {
+                const container = document.querySelector('[data-ghost-active-post="true"]') || document;
+                const btns = Array.from(container.querySelectorAll('button, div[role="button"]'));
                 
-                // Real submit buttons are usually primary color (blue) and don't have SVGs
-                if (klass.includes('primary')) score += 50;
-                if (!hasSvg) score += 20; else score -= 50;
+                let bestBtn = null;
+                let maxScore = -100;
                 
-                // Favor buttons near or inside a comment box
-                if (b.closest('form, div[class*="comment-box"], div[class*="comments"], [class*="submit"]')) score += 30;
-                if (b.type === 'submit') score += 20;
+                for (const b of btns) {
+                    // If the element has a disabled attribute or aria-disabled="true", skip
+                    const disabled = b.disabled || b.getAttribute('aria-disabled') === 'true';
+                    if (disabled) continue;
 
-                const rect = b.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0) {
-                    if (score > maxScore) {
-                        maxScore = score;
-                        bestBtn = b;
+                    const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    const rawKlass = b.className;
+                    const klass = (typeof rawKlass === 'string' ? rawKlass : '').toLowerCase();
+                    
+                    let score = 0;
+                    let isSubmit = false;
+
+                    if (text === 'comment') {
+                        score += 60;
+                        isSubmit = true;
+                    } else if (text === 'post' || text === 'reply') {
+                        score += 50;
+                        isSubmit = true;
+                    }
+                    if (klass.includes('submit-button') || klass.includes('artdeco-button--primary')) {
+                        score += 40;
+                        isSubmit = true;
+                    }
+                    if (b.type === 'submit') {
+                        score += 30;
+                        isSubmit = true;
+                    }
+                    
+                    // We only care about buttons that look like submit buttons
+                    if (!isSubmit && !(klass.includes('primary') && b.closest('.comments-comment-box'))) continue;
+
+                    if (klass.includes('primary')) score += 20;
+                    
+                    // Penalize heavily if it's an action bar button to avoid clicking the reaction bar's "Comment"
+                    const actionBar = b.closest('.feed-shared-social-action-bar, .update-v2-social-activity');
+                    if (actionBar || klass.includes('reaction') || klass.includes('social-action')) {
+                        score -= 500;
+                    }
+                    
+                    // Favor buttons near or inside a comment box
+                    const parentBox = b.closest('form, div[class*="comment-box"], div[class*="comments"], [class*="submit"]');
+                    if (parentBox && !actionBar) score += 50;
+
+                    const rect = b.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        if (score > maxScore) {
+                            maxScore = score;
+                            bestBtn = b;
+                        }
                     }
                 }
-            }
+                
+                if (bestBtn && maxScore > 0) {
+                    bestBtn.scrollIntoView({behavior: "instant", block: "center"});
+                    const rect = bestBtn.getBoundingClientRect();
+                    return {x: rect.x + rect.width/2, y: rect.y + rect.height/2, found: true, score: maxScore};
+                }
+                return {found: false};
+            }""")
             
-            if (bestBtn && maxScore > 0) {
-                const rect = bestBtn.getBoundingClientRect();
-                return {x: rect.x + rect.width/2, y: rect.y + rect.height/2, found: true, score: maxScore};
-            }
-            return {found: false};
-        }""")
-        
-        if button_info and button_info.get("found"):
-            cx, cy = button_info["x"], button_info["y"]
-            print(f"[Interact] [Comment] ✅ Found submit button via evaluated DOM at ({cx:.0f},{cy:.0f})")
-            human_click(page, cx, cy)
-            submitted = True
-            
-    except Exception as e:
-        print(f"[Interact] [Comment] DOM submit search error: {e}")
+            if button_info and button_info.get("found"):
+                cx, cy = button_info["x"], button_info["y"]
+                print(f"[Interact] [Comment] ✅ Found submit button via evaluated DOM at ({cx:.0f},{cy:.0f})")
+                if cy < 0 or ("height" in page.viewport_size and cy > page.viewport_size["height"]):
+                    print("[Interact] [Comment] ⚠️ Evaluate bounds out of range. Skipping to locators.")
+                    pass # Falls through to 4B
+                else:
+                    human_click(page, cx, cy)
+                    submitted = True
+                    break
+                
+        except Exception as e:
+            print(f"[Interact] [Comment] DOM submit search error: {e}")
 
-    # 4B: Last resort fallback to Ctrl+Enter
+        # 4B: Playwright fallback locator
+        if not submitted:
+            print("[Interact] [Comment] ⚠️ DOM JS eval failed, trying Playwright locator...")
+            try:
+                locators = [
+                    '[data-ghost-active-post="true"] button.comments-comment-box__submit-button',
+                    '[data-ghost-active-post="true"] button.artdeco-button--primary:has-text("Comment")',
+                    '[data-ghost-active-post="true"] button.artdeco-button--primary:has-text("Post")',
+                    'button.comments-comment-box__submit-button',
+                    'button.artdeco-button--primary:has-text("Comment")',
+                    'button.artdeco-button--primary:has-text("Post")'
+                ]
+                for sel in locators:
+                    elements = page.locator(sel)
+                    for i in range(elements.count()):
+                        btn = elements.nth(i)
+                        if btn.is_visible() and not btn.is_disabled():
+                            btn.click()
+                            print(f"[Interact] [Comment] ✅ Clicked submit via locator {sel}")
+                            submitted = True
+                            break
+                    if submitted:
+                        break
+            except Exception as e:
+                print(f"[Interact] [Comment] ❌ Playwright locator error: {e}")
+
+        # 4C: ACT Tree fallback
+        if not submitted:
+            print("[Interact] [Comment] ⚠️ locator failed, trying ACT...")
+            try:
+                tree = extract_act(page)
+                # Look for 'Comment' buttons specifically prior to 'Post'
+                submit_candidates = find_buttons(tree, "Comment") or find_buttons(tree, "Post")
+                if submit_candidates:
+                    for btn in submit_candidates:
+                        if "search" not in (btn.get("name", "") or "").lower():
+                            from navigator import _click_act_element
+                            _click_act_element(page, btn)
+                            print(f"[Interact] [Comment] ✅ Clicked submit via ACT tree: {btn.get('name')}")
+                            submitted = True
+                            break
+            except Exception as e:
+                print(f"[Interact] [Comment] ❌ ACT submit search error: {e}")
+
+        if not submitted:
+            # Wait a little before the next attempt, in case the button is still disabled
+            random_delay(0.8, 1.5)
+
     if not submitted:
-        print("[Interact] [Comment] ⚠️ Submit button not found, falling back to Ctrl+Enter...")
-        page.keyboard.press("Control+Enter")
-        random_delay(0.2, 0.4)
-        page.keyboard.press("Enter")
-        submitted = True
+        print("[Interact] [Comment] ❌ Submit button not found after retries. Aborting comment attempt.")
+        # Explicitly removed Ctrl+Enter fallback
 
     wait_for_stable(page, timeout=3000)
 
-    # 4C: Verify the comment was submitted by checking if the text input cleared
-    try:
-        # After a successful post, the comment input is usually cleared or collapsed
+    # 5: Source of Truth Verification
+    def check_if_comment_cleared():
         verify_selectors = [
             '[role="textbox"][aria-label*="comment" i]',
             '[contenteditable="true"][aria-label*="comment" i]',
         ]
-        for selector in verify_selectors:
-            locator = page.locator(selector)
-            if locator.count() > 0:
-                content = locator.first.text_content() or ""
-                if comment_text[:20] in content:
-                    # Comment text is still there — submit might have failed
-                    print("[Interact] [Comment] ⚠️ Text still in input — retrying with Ctrl+Enter...")
-                    locator.first.focus()
-                    random_delay(0.2, 0.4)
-                    page.keyboard.press("Control+Enter")
-                    wait_for_stable(page, timeout=3000)
-                break
-    except Exception:
-        pass  # Verification is best-effort
+        try:
+            for selector in verify_selectors:
+                locator = page.locator(selector)
+                if locator.count() > 0:
+                    content = locator.first.text_content() or ""
+                    # Check if at least 15 chars of our comment are still there
+                    if comment_text[:15] in content:
+                        return False # Still there
+            return True # Cleared
+        except Exception:
+            return True # Default to success if we can't verify
 
-    print("[Interact] 💬 Comment posted!")
+    success = check_if_comment_cleared()
     
-    audit_logger.log_event(
-        action_name="Comment on Post",
-        extracted_text=extracted_post_text, # To show what we responded to
-        generated_response=comment_text,
-        success=True
-    )
-    
-    return True
+    # 6: Self-healing fallback if initial submit failed
+    if not success:
+        print("[Interact] [Comment] ⚠️ Verification failed (text still in input). Attempting self-healing...")
+        try:
+            from self_healing_bridge import heal_selector
+            html_content = page.content()
+            heal_res = heal_selector("Click the main Comment Submit or Post button (typically blue or primary color) inside the comment box to post the typed comment", html_content, "Submit button failed")
+            if heal_res and heal_res.get("status") == "fixed" and heal_res.get("newSelector"):
+                new_sel = heal_res["newSelector"]
+                print(f"[Interact] [Comment] 🛠️ Self-healing suggested selector: {new_sel}")
+                locator = page.locator(new_sel)
+                if locator.count() > 0 and locator.first.is_visible():
+                    locator.first.click()
+                    print("[Interact] [Comment] ✅ Attempted submit via self-healed selector!")
+                    wait_for_stable(page, timeout=3000)
+                    success = check_if_comment_cleared()
+        except Exception as e:
+            print(f"[Interact] [Comment] ❌ Self-healing error: {e}")
+
+    if success:
+        print("[Interact] 💬 Comment posted!")
+        audit_logger.log_event(
+            action_name="Comment on Post",
+            extracted_text=extracted_post_text,
+            generated_response=comment_text,
+            success=True
+        )
+        return True
+    else:
+        print("[Interact] ❌ Failed to post comment.")
+        audit_logger.log_event(
+            action_name="Comment on Post",
+            extracted_text=extracted_post_text, 
+            generated_response=comment_text,
+            success=False,
+            error_msg="Text remained in input after all submit attempts including self-healing."
+        )
+        return False
 
 
 def find_recent_posts(page, profile_url=None):

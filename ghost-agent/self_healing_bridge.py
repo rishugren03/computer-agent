@@ -52,8 +52,16 @@ def heal_selector(intent, html_content, error_message="Timeout Error"):
         if json_match:
             return json.loads(json_match.group(0))
         
+        print(f"[Self-Healing Bridge] Could not parse JSON. Output: {output}")
+        if result.stderr:
+            print(f"[Self-Healing Bridge] STDERR: {result.stderr}")
         return {"status": "failed", "newSelector": ""}
         
+    except subprocess.CalledProcessError as e:
+        print(f"[Self-Healing Bridge] Subprocess Error: {e}")
+        print(f"[Self-Healing Bridge] STDOUT: {e.stdout}")
+        print(f"[Self-Healing Bridge] STDERR: {e.stderr}")
+        return {"status": "failed", "newSelector": ""}
     except Exception as e:
         print(f"[Self-Healing Bridge] Error: {e}")
         return {"status": "failed", "newSelector": ""}

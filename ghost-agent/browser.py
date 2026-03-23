@@ -12,6 +12,7 @@ from patchright.sync_api import sync_playwright
 import random
 import os
 import time
+import json
 
 from config import (
     BROWSER_DATA_DIR,
@@ -39,12 +40,32 @@ def open_browser(url="https://www.linkedin.com"):
     user_data_dir = os.path.join(os.getcwd(), BROWSER_DATA_DIR)
     os.makedirs(user_data_dir, exist_ok=True)
 
-    # Randomize viewport dimensions slightly per session
-    width = VIEWPORT_BASE_WIDTH + random.randint(-VIEWPORT_JITTER, VIEWPORT_JITTER)
-    height = VIEWPORT_BASE_HEIGHT + random.randint(-VIEWPORT_JITTER, VIEWPORT_JITTER)
-
-    # Pick a random user agent
-    user_agent = random.choice(USER_AGENTS)
+    # Store fingerprint per session to prevent LinkedIn's security detection
+    fingerprint_file = os.path.join(user_data_dir, "fingerprint.json")
+    if os.path.exists(fingerprint_file):
+        try:
+            with open(fingerprint_file, "r") as f:
+                fp = json.load(f)
+            width = fp.get("width", VIEWPORT_BASE_WIDTH)
+            height = fp.get("height", VIEWPORT_BASE_HEIGHT)
+            user_agent = fp.get("user_agent", random.choice(USER_AGENTS))
+            print(f"[Browser] ℹ️ Loaded persistent fingerprint for this session.")
+        except Exception as e:
+            print(f"[Browser] ⚠️ Error loading fingerprint: {e}")
+            width = VIEWPORT_BASE_WIDTH + random.randint(-VIEWPORT_JITTER, VIEWPORT_JITTER)
+            height = VIEWPORT_BASE_HEIGHT + random.randint(-VIEWPORT_JITTER, VIEWPORT_JITTER)
+            user_agent = random.choice(USER_AGENTS)
+    else:
+        # Create a new fingerprint for this fresh session
+        width = VIEWPORT_BASE_WIDTH + random.randint(-VIEWPORT_JITTER, VIEWPORT_JITTER)
+        height = VIEWPORT_BASE_HEIGHT + random.randint(-VIEWPORT_JITTER, VIEWPORT_JITTER)
+        user_agent = random.choice(USER_AGENTS)
+        try:
+            with open(fingerprint_file, "w") as f:
+                json.dump({"width": width, "height": height, "user_agent": user_agent}, f)
+            print(f"[Browser] 🔒 Saved new device fingerprint for session persistence.")
+        except Exception as e:
+            print(f"[Browser] ⚠️ Error saving fingerprint: {e}")
 
     # Build launch options
     launch_args = {
@@ -81,13 +102,52 @@ def open_browser(url="https://www.linkedin.com"):
 
     page = context.pages[0] if context.pages else context.new_page()
 
-    # Inject mouse position tracking for Bézier curves
-    page.evaluate("""() => {
+    # Inject a visual cursor and mouse position tracking for Bézier curves
+    # This runs on every page load automatically.
+    context.add_init_script("""
+        // Track mouse globally
         document.addEventListener('mousemove', (e) => {
             window._mouseX = e.clientX;
             window._mouseY = e.clientY;
+        }, { capture: true });
+
+        // Inject visual cursor when DOM is ready
+        window.addEventListener('DOMContentLoaded', () => {
+            if (document.getElementById('ghost-agent-cursor')) return;
+            
+            const cursor = document.createElement('div');
+            cursor.id = 'ghost-agent-cursor';
+            cursor.style.width = '16px';
+            cursor.style.height = '16px';
+            cursor.style.backgroundColor = 'rgba(255, 0, 0, 0.6)';
+            cursor.style.border = '2px solid white';
+            cursor.style.borderRadius = '50%';
+            cursor.style.position = 'fixed';
+            cursor.style.pointerEvents = 'none';
+            cursor.style.zIndex = '2147483647';
+            cursor.style.transform = 'translate(-50%, -50%)';
+            cursor.style.transition = 'transform 0.05s linear, background-color 0.1s';
+            // Start offscreen
+            cursor.style.left = '-100px';
+            cursor.style.top = '-100px';
+            document.documentElement.appendChild(cursor);
+
+            document.addEventListener('mousemove', (e) => {
+                cursor.style.left = e.clientX + 'px';
+                cursor.style.top = e.clientY + 'px';
+            }, { capture: true });
+            
+            document.addEventListener('mousedown', () => {
+                cursor.style.backgroundColor = 'rgba(0, 255, 0, 0.7)';
+                cursor.style.transform = 'translate(-50%, -50%) scale(0.7)';
+            }, { capture: true });
+            
+            document.addEventListener('mouseup', () => {
+                cursor.style.backgroundColor = 'rgba(255, 0, 0, 0.6)';
+                cursor.style.transform = 'translate(-50%, -50%) scale(1)';
+            }, { capture: true });
         });
-    }""")
+    """)
 
     page.goto(url, wait_until="domcontentloaded")
 

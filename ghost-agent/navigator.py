@@ -64,13 +64,35 @@ def navigate_to_search(page, query):
     """
     print(f"[Navigator] Searching for: {query}")
 
+    # For LinkedIn search, the input is often a combobox, searchbox, or textbox.
+    # We tell it to discover textboxes (which includes searchbox).
     clicked = _click_cached_or_discover(page, "search_input", "textbox", "Search", find_textboxes)
 
     if clicked:
         random_delay(0.3, 0.6)
+        # Ensure we have focus! Playwright sometimes loses focus with synthetic mouse clicks.
+        try:
+            # Fallback to direct locator to ensure focus
+            locators = [
+                page.get_by_role("combobox", name="Search", exact=False),
+                page.get_by_role("searchbox", name="Search", exact=False),
+                page.get_by_role("textbox", name="Search", exact=False),
+                page.get_by_placeholder("Search", exact=False)
+            ]
+            for loc in locators:
+                if loc.count() > 0:
+                    # click with force instead of soft focus to ensure it's active
+                    loc.first.click(timeout=2000)
+                    break
+        except Exception as e:
+            print(f"[Navigator] Warning: Could not explicitly focus search box: {e}")
+            
         # Clear existing text and type new query
         page.keyboard.press("Control+a")
         random_delay(0.1, 0.2)
+        page.keyboard.press("Backspace")
+        random_delay(0.1, 0.2)
+        
         human_type(page, query)
         random_delay(0.4, 0.8)
         page.keyboard.press("Enter")
@@ -79,6 +101,8 @@ def navigate_to_search(page, query):
         human_click(page, 450, 25)  # Search bar is typically near top-center
         random_delay(0.5, 0.8)
         page.keyboard.press("Control+a")
+        random_delay(0.1, 0.2)
+        page.keyboard.press("Backspace")
         random_delay(0.1, 0.2)
         human_type(page, query)
         random_delay(0.4, 0.8)

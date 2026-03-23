@@ -79,13 +79,14 @@ def run_agent(prospects=None, continuous=False):
     while True:
         # ─── Check Schedule ──────────────────────────────────────────
 
-        if not is_active_hours():
-            print("\n[Agent] 😴 Outside active hours")
-            if continuous:
-                wait_for_active_hours()
-            else:
-                print("[Agent] Not in continuous mode. Exiting.")
-                return
+        # TEMP: Disabling active hours check for testing
+        # if not is_active_hours():
+        #     print("\n[Agent] 😴 Outside active hours")
+        #     if continuous:
+        #         wait_for_active_hours()
+        #     else:
+        #         print("[Agent] Not in continuous mode. Exiting.")
+        #         return
 
         # ─── Launch Browser ──────────────────────────────────────────
 
