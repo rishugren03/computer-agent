@@ -240,6 +240,57 @@ def cmd_test_search(args):
         close_browser(context, playwright)
 
 
+def cmd_test_connect(args):
+    """Test connecting to a person after searching them."""
+    from browser import open_browser, close_browser, wait_for_stable
+    from linkedin.auth import ensure_session, wait_for_login, is_logged_in
+    from linkedin.connect import send_connection
+
+    if not args:
+        print("❌ Please provide a name to search for. Example: python cli.py test_connect \"John Doe\"")
+        return
+
+    query = " ".join(args)
+    print(f"🔗 Testing connect functionality for: {query}")
+
+    page, context, playwright = open_browser("https://www.linkedin.com/feed/")
+    wait_for_stable(page, timeout=10000)
+
+    try:
+        if not is_logged_in(page):
+            print("⚠️ Not logged in. Waiting for manual login...")
+            logged_in = wait_for_login(page)
+            if not logged_in:
+                print("❌ Could not log in")
+                return
+
+        if not ensure_session(page):
+            print("❌ Session issue")
+            return
+
+        print("✅ Logged in. Testing connection flow...")
+        note = f"Hi {query.split()[0]}, I'd like to join your LinkedIn network. (Test Note)"
+        
+        # Test the connection flow
+        result = send_connection(page, query, note, guardrails=None)
+        
+        print(f"✅ Connection attempt complete. Result: {result['status']}")
+        if result['status'] != 'sent':
+            print(f"ℹ️ Reason/Details: {result.get('reason', 'Unknown')}")
+            
+        print("🎉 Test complete! Browser will remain open for 15 seconds to inspect.")
+        import time
+        time.sleep(15)
+
+    except Exception as e:
+        print(f"❌ Error during test: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print("🧹 Cleaning up browser...")
+        close_browser(context, playwright)
+
+
 def cmd_help(args=None):
     """Print help message."""
     print("""
@@ -253,12 +304,14 @@ Commands:
   python cli.py stats              Show daily/weekly statistics
   python cli.py warmup             Manually trigger a warm-up session
   python cli.py test_search "Name" Test the search functionality isolated
+  python cli.py test_connect "Name" Test the connection functionality isolated
   python cli.py help               Show this help message
 
 Examples:
   python cli.py setup
   python cli.py warmup
   python cli.py test_search "Utkarsh Kumar Bakhtiyarpur"
+  python cli.py test_connect "Utkarsh Kumar Bakhtiyarpur"
   python cli.py run "John Doe" "Jane Smith"
   python cli.py run -c
   python cli.py review
@@ -273,6 +326,7 @@ COMMANDS = {
     "warmup": cmd_warmup,
     "setup": cmd_setup,
     "test_search": cmd_test_search,
+    "test_connect": cmd_test_connect,
     "help": cmd_help,
 }
 
