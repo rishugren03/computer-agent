@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Ghost-OS Session Sync",
+  "version": "1.0.0",
+  "description": "Syncs LinkedIn session to Ghost-OS",
+  "permissions": ["cookies"],
+  "host_permissions": [
+    "*://*.linkedin.com/*",
+    "*://localhost/*"
+  ],
+  "action": {
+    "default_popup": "index.html"
+  }
+}
