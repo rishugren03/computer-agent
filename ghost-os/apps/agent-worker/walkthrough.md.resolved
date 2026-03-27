@@ -1,0 +1,99 @@
+# GhostAgent — Implementation Walkthrough
+
+## What Was Built
+
+A full-stack LinkedIn automation agent ("Digital Twin") with **25 files** across **6 phases**, built on top of the existing `computer-agent` codebase.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    CLI[cli.py — Setup / Run / Review / Stats] --> Agent[agent.py — Orchestrator]
+    Agent --> Schedule[scheduler.py — Sleep/Wake Cycle]
+    Agent --> Guard[guardrails.py — Rate Limits SQLite]
+    Agent --> Warmup[warmup.py — 48h Ghost Mode]
+    
+    Agent --> Nav[navigator.py — Non-Linear Navigation]
+    Nav --> ACT[accessibility.py — ACT Extraction]
+    Nav --> Human[human.py — Bézier / Jitter / Typo]
+    Nav --> Browser[browser.py — Stealth Patchright]
+    
+    Agent --> Connect[connect.py — Connection Flow]
+    Agent --> Interact[interact.py — Post Engagement]
+    Agent --> Inbox[inbox.py — Smart Replies]
+    
+    Connect --> GW[ghostwriter.py — AI Messages]
+    GW --> Vision[vision.py — Gemini + DeepSeek]
+    GW --> Persona[persona.py — Style Clone]
+    GW --> Diversity[diversity.py — Uniqueness]
+    
+    Agent --> Queue[approval_queue.py — Tinder Review]
+```
+
+## File Summary
+
+| Phase | File | Purpose |
+|-------|------|---------|
+| **Core** | [config.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/config.py) | All limits, tuning constants, API keys, proxy settings |
+| | [browser.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/browser.py) | Stealth browser with proxy, GPS, UA rotation |
+| | [human.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/human.py) | Bézier mouse, micro-jitters, overshoot, typos, inertial scroll |
+| | [accessibility.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/accessibility.py) | ACT extraction and semantic element querying |
+| **Vision** | [vision.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/vision.py) | Gemini vision analysis + DeepSeek action decisions |
+| | [semantic_map.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/semantic_map.py) | Persistent ACT cache with self-heal on miss |
+| | [navigator.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/navigator.py) | Non-linear navigation with detours and organic browsing |
+| **LinkedIn** | [auth.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/linkedin/auth.py) | Session management, login detection |
+| | [warmup.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/linkedin/warmup.py) | 48-hour warm-up with Day 1/Day 2 activities |
+| | [profile.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/linkedin/profile.py) | Profile viewing with section-based dwell time |
+| | [connect.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/linkedin/connect.py) | Full connection workflow: search → view → note → send |
+| | [interact.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/linkedin/interact.py) | Like, comment, pre-connection engagement hook |
+| | [inbox.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/linkedin/inbox.py) | Message classification + auto-reply + lead flagging |
+| **AI** | [persona.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/persona.py) | Writing style cloning from user's posts |
+| | [ghostwriter.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/ghostwriter.py) | AI message generation with persona matching |
+| | [approval_queue.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/approval_queue.py) | Tinder-style review queue, auto-pilot at 90% |
+| **Safety** | [guardrails.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/guardrails.py) | SQLite rate limits (25 connects, 80 views/day) |
+| | [scheduler.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/scheduler.py) | Timezone-aware sleep/wake, session timing |
+| | [diversity.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/diversity.py) | Message uniqueness via Jaccard similarity |
+| **Main** | [agent.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/agent.py) | Orchestrator loop (schedule → warmup → engage → connect → inbox) |
+| | [cli.py](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/cli.py) | CLI: [setup](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/cli.py#159-193), [run](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/cli.py#11-20), [review](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/cli.py#22-69), [stats](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/approval_queue.py#152-162), [warmup](file:///home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent/cli.py#117-157) |
+
+## Anti-Detection Features
+
+| Feature | Implementation |
+|---------|---------------|
+| **Bézier mouse paths** | Cubic curves with micro-jitters (2px tremor) |
+| **Click pressure** | `mouseDown()` → 75-200ms delay → `mouseUp()` |
+| **Overshoot** | 20% of clicks overshoot by 5-15px then correct |
+| **Typing typos** | 3% chance of wrong key → backspace → correct |
+| **Inertial scroll** | Fast start, gradual deceleration (trackpad physics) |
+| **Content-aware dwell** | Reading speed = 180-280 WPM × word count |
+| **Random detours** | 30% chance of "distraction" before target action |
+| **Non-linear nav** | Never uses direct URLs — always search → click |
+| **Session timing** | 15-45 min sessions, 2-5 min micro-breaks |
+| **Sleep cycle** | 8am-11pm in user timezone, 8h offline |
+
+## How to Run
+
+```bash
+cd /home/rishu/Documents/Codewave-Labs/computer-agent/ghost-agent
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+patchright install chromium
+
+# 1. First-time setup
+python cli.py setup
+
+# 2. Start warm-up (must run for 48h before outreach)
+python cli.py warmup
+
+# 3. Review AI-generated connection notes
+python cli.py review
+
+# 4. Start the agent
+python cli.py run "John Doe" "Jane Smith"
+
+# 5. Run continuously (sleep/wake cycle)
+python cli.py run -c
+
+# 6. Check stats
+python cli.py stats
+```

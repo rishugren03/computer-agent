@@ -1,0 +1,24 @@
+# Environment
+.env
+.env.example
+venv/
+__pycache__/
+*.pyc
+
+# Data (session state, cookies, fingerprints)
+ghost_data/
+ghost_browser_data/
+
+# Screenshots
+/tmp/ghost_screenshots/
+
+# SQLite databases
+*.db
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

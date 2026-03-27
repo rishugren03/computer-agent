@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GhostAgent Audit</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <span class="logo-icon">👻</span>
+                    <h1>GhostAgent Audit</h1>
+                </div>
+                <div class="stats">
+                    <div class="stat-item" id="total-actions">
+                        <span class="stat-label">Total Actions</span>
+                        <span class="stat-value">0</span>
+                    </div>
+                </div>
+                <button class="refresh-btn" id="refresh-btn">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                        <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.59-9.36l5.67-5.67"/>
+                    </svg>
+                    Refresh
+                </button>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <div id="loading" class="loading-state">
+                <div class="spinner"></div>
+                <p>Loading audit logs...</p>
+            </div>
+            
+            <div id="error-state" class="error-state hidden">
+                <p>Failed to load logs. Is the backend running?</p>
+            </div>
+
+            <div id="logs-grid" class="logs-grid hidden">
+                <!-- Log cards will be injected here via JS -->
+            </div>
+            
+            <div id="empty-state" class="empty-state hidden">
+                <div class="empty-icon">📝</div>
+                <h2>No logs yet</h2>
+                <p>Start GhostAgent to see interactions appear here.</p>
+            </div>
+        </main>
+    </div>
+
+    <!-- Image Modal -->
+    <div id="image-modal" class="modal hidden">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content">
+            <button class="modal-close" id="modal-close">×</button>
+            <img id="modal-image" src="" alt="Full screenshot">
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
