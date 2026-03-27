@@ -13,6 +13,8 @@ import random
 import time
 import math
 
+from broadcaster import broadcast_screen
+
 from config import (
     CLICK_DURATION_MIN_MS,
     CLICK_DURATION_MAX_MS,
@@ -142,6 +144,7 @@ def human_move_to(page, x, y):
 
     # Track position for next call
     page.evaluate(f"() => {{ window._mouseX = {x}; window._mouseY = {y}; }}")
+    broadcast_screen(page)
 
 
 def human_click(page, x, y):
@@ -187,6 +190,7 @@ def human_click(page, x, y):
     page.mouse.up()
 
     random_delay(0.08, 0.25)
+    broadcast_screen(page)
 
 
 def human_double_click(page, x, y):
@@ -248,6 +252,11 @@ def human_type(page, text):
             delay += random.uniform(0.02, 0.06)
 
         time.sleep(delay)
+        # Broadcast roughly every 5-10 characters dynamically
+        if i % 10 == 0:
+            broadcast_screen(page)
+            
+    broadcast_screen(page)
 
 
 def _get_nearby_keys(char):
@@ -332,6 +341,7 @@ def human_scroll(page, direction="down", amount=None):
         page.mouse.wheel(0, remaining)
 
     random_delay(0.2, 0.5)
+    broadcast_screen(page)
 
 
 def scroll_to_element(page, bbox):
@@ -382,6 +392,7 @@ def idle_fidget(page, duration_seconds=None):
         time.sleep(random.uniform(0.3, 0.8))
         cx += dx // 2  # Drift slightly
         cy += dy // 2
+        broadcast_screen(page)
 
 
 def dwell_on_content(page, word_count):

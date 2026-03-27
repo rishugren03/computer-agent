@@ -13,6 +13,8 @@ import random
 import os
 import time
 import json
+import base64
+import redis
 
 from config import (
     BROWSER_DATA_DIR,
@@ -70,7 +72,7 @@ def open_browser(url="https://www.linkedin.com"):
     # Build launch options
     launch_args = {
         "user_data_dir": user_data_dir,
-        "headless": False,
+        "headless": True,
         "viewport": {"width": width, "height": height},
         "user_agent": user_agent,
         "locale": USER_LOCALE,
@@ -231,4 +233,27 @@ def close_browser(context, playwright):
     try:
         playwright.stop()
     except Exception:
+        pass
+
+
+def broadcast_screen(page):
+    """Capture a screenshot of the current page and publish it to Redis.
+    
+    This is used to feed the Live View stream on the dashboard during
+    manual interactions or autonomous execution.
+    """
+    try:
+        # Take a compressed JPEG screenshot for speed
+        screenshot_bytes = page.screenshot(type='jpeg', quality=80)
+        
+        # Base64 encode for WebSocket transmission
+        b64_data = base64.b64encode(screenshot_bytes).decode('utf-8')
+        
+        # Publish to Redis channel monitored by the API
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        r = redis.Redis.from_url(redis_url)
+        r.publish("live_view", b64_data)
+        r.close()
+    except Exception as e:
+        # Failing to broadcast isn't fatal, so just log it
         pass

@@ -11,17 +11,55 @@ redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 # Setup TaskIQ Broker
 broker = ListQueueBroker(redis_url).with_result_backend(RedisAsyncResultBackend(redis_url))
 
+import multiprocessing
+
+def _run_agent_process(prospects, continuous):
+    from agent import run_agent
+    run_agent(prospects=prospects, continuous=continuous)
+
+import redis
+import signal
+
+@broker.task(task_name="stop_campaign")
+def stop_campaign_task():
+    r = redis.Redis.from_url(redis_url)
+    pid_bytes = r.get("ghost_os_active_pid")
+    if pid_bytes:
+        pid = int(pid_bytes)
+        try:
+            os.kill(pid, signal.SIGTERM)
+            r.delete("ghost_os_active_pid")
+            return {"status": "killed", "pid": pid}
+        except ProcessLookupError:
+            pass
+    return {"status": "not_running"}
+
 @broker.task(task_name="run_campaign")
 def run_campaign_task(prospects: list = None, continuous: bool = False):
     """
     TaskIQ task to run Ghost-OS outreach campaigns.
     Reads from the Redis queue.
     """
-    from agent import run_agent
-    
     print(f"[Worker] Received run_campaign job! Prospects: {prospects}, Continuous: {continuous}")
     try:
-        run_agent(prospects=prospects, continuous=continuous)
+        # Run agent in a separate process to avoid greenlet/asyncio thread conflicts
+        # between TaskIQ's async environment and patchright's sync_api
+        ctx = multiprocessing.get_context("spawn")
+        p = ctx.Process(target=_run_agent_process, args=(prospects, continuous))
+        p.start()
+        
+        # Track the active process ID in Redis for the kill switch
+        r = redis.Redis.from_url(redis_url)
+        r.set("ghost_os_active_pid", p.pid)
+        
+        p.join()
+        
+        # Cleanup
+        r.delete("ghost_os_active_pid")
+        
+        if p.exitcode != 0 and p.exitcode != -15:  # -15 is SIGTERM (killed by us)
+            raise Exception(f"Agent process exited with code {p.exitcode}")
+            
         return {"status": "success", "message": "Campaign completed successfully"}
     except Exception as e:
         print(f"[Worker] Campaign failed: {e}")

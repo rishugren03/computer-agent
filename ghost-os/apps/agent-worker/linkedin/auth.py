@@ -7,36 +7,58 @@ Handles:
 - Identity confirmation handling
 """
 
-from browser import wait_for_stable, get_current_url
+from browser import wait_for_stable, get_current_url, broadcast_screen
 from human import random_delay
+import redis
+import json
+import os
+import time
+from db import update_session_cookies
 
 
 def is_logged_in(page):
     """Check if the user is currently logged into LinkedIn.
 
-    Looks for feed content or profile nav elements that only
-    appear when authenticated.
-
-    Returns:
-        bool: True if logged in, False if on login/signup page.
+    Uses multiple indicators:
+    1. URL patterns (feed, mynetwork, messaging, etc.)
+    2. Presence of authenticated UI elements (nav bar, search bar, profile photo)
     """
     try:
         url = get_current_url(page)
 
-        # If redirected to login page, not logged in
-        if "/login" in url or "/signup" in url or "login" in url.split("?")[0]:
+        # Explicit login/signup URLs are definitely "not logged in"
+        if any(p in url for p in ["/login", "/signup", "/uno-reg"]):
             return False
 
-        # Check for authenticated nav elements
-        has_feed = page.evaluate("""() => {
-            // Check for the main nav bar (only shows when logged in)
-            const nav = document.querySelector('nav, [role="navigation"]');
-            const feed = document.querySelector('[data-control-name="feed"], .feed-shared-update');
-            const globalNav = document.querySelector('.global-nav, #global-nav');
-            return !!(nav || feed || globalNav);
+        # Check for multiple indicators of an active session
+        is_auth = page.evaluate("""() => {
+            const markers = [
+                // Top nav bar
+                '#global-nav', '.global-nav',
+                // Me profile photo
+                '.global-nav__me-photo',
+                // Feed container
+                '[data-control-name="feed"]', '.feed-shared-update',
+                // Identity/Profile elements
+                '.identity-block', 
+                // Global search bar
+                '.search-global-typeahead__input',
+                // Home/Messaging links
+                '[data-test-global-nav-link-home]', '[data-test-global-nav-link-messaging]'
+            ];
+            
+            return markers.some(selector => !!document.querySelector(selector));
         }""")
 
-        return has_feed
+        # If we see authenticated elements, we're logged in
+        if is_auth:
+            return True
+
+        # Fallback: if we are on the feed or network page, we are likely logged in
+        if any(p in url for p in ["/feed", "/mynetwork", "/in/", "/messaging"]):
+            return True
+
+        return False
 
     except Exception as e:
         print(f"[Auth] Error checking login state: {e}")
@@ -73,29 +95,86 @@ def ensure_session(page):
 
 
 def wait_for_login(page, timeout_seconds=300):
-    """Wait for the user to complete manual login.
+    """Wait for the user to complete manual login via dashboard.
 
-    Used during first-time setup when no session cookies exist.
-    Polls every 5 seconds for up to `timeout_seconds`.
-
-    Returns:
-        bool: True if login detected, False if timeout.
+    Broadens the status to 'manual_login_required' and listens for
+    mouse/keyboard interactions from the Redis 'agent_input' channel.
     """
-    import time
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    r = redis.Redis.from_url(redis_url)
+    pubsub = r.pubsub()
+    pubsub.subscribe("agent_input")
 
-    print("[Auth] ⏳ Waiting for manual LinkedIn login...")
-    print(f"[Auth] Please log in within {timeout_seconds // 60} minutes.")
+    print("[Auth] ⏳ Waiting for manual LinkedIn login via dashboard...")
+    r.publish("agent_status", "manual_login_required")
 
     start = time.time()
-    while time.time() - start < timeout_seconds:
-        if is_logged_in(page):
-            print("[Auth] ✅ Login detected!")
-            random_delay(1.0, 2.0)
-            return True
-        time.sleep(5)
+    try:
+        while time.time() - start < timeout_seconds:
+            # 1. Check if logged in
+            if is_logged_in(page):
+                print("[Auth] ✅ Login detected!")
+                r.publish("agent_status", "running")
+                
+                # Capture and save cookies
+                cookies = page.context.cookies()
+                li_at = next((c['value'] for c in cookies if c['name'] == 'li_at'), None)
+                jsessionid = next((c['value'] for c in cookies if c['name'] == 'JSESSIONID'), None)
+                
+                if li_at and jsessionid:
+                    update_session_cookies(li_at, jsessionid)
+                    print("[Auth] 🍪 Session cookies saved to database.")
+                
+                random_delay(1.0, 2.0)
+                return True
+
+            # 2. Process pending interactions from dashboard
+            message = pubsub.get_message(ignore_subscribe_messages=True)
+            if message:
+                try:
+                    data = json.loads(message['data'])
+                    _handle_dashboard_interaction(page, data)
+                except Exception as e:
+                    print(f"[Auth] Error handling interaction: {e}")
+
+            # 3. Keep the live view updated
+            broadcast_screen(page)
+            
+            time.sleep(0.5) # Poll frequently for responsiveness
+    finally:
+        pubsub.unsubscribe("agent_input")
+        r.publish("agent_status", "running")
 
     print("[Auth] ❌ Login timeout reached.")
     return False
+
+
+def _handle_dashboard_interaction(page, data):
+    """Execute mouse/keyboard interactions received from the dashboard."""
+    action_type = data.get("type")
+    
+    if action_type == "click":
+        x, y = data.get("x"), data.get("y")
+        if x is not None and y is not None:
+            # Physical click sequence for better reliability on dynamic elements
+            page.mouse.move(x, y)
+            page.mouse.down()
+            # Brief hold for realism and event registration
+            time.sleep(0.1)
+            page.mouse.up()
+            print(f"[Auth] 🖱️ Manual click at ({x}, {y})")
+            
+    elif action_type == "key":
+        key = data.get("key")
+        if key:
+            page.keyboard.press(key)
+            print(f"[Auth] ⌨️ Manual key press: {key}")
+            
+    elif action_type == "type":
+        text = data.get("text")
+        if text:
+            page.keyboard.type(text)
+            print(f"[Auth] ⌨️ Manual typing: {text}")
 
 
 def check_session_or_relogin(page, timeout_seconds=300):

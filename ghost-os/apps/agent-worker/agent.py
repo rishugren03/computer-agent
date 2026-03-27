@@ -94,26 +94,7 @@ def run_agent(prospects=None, continuous=False):
         page, context, playwright = open_browser("https://www.linkedin.com/feed/")
         wait_for_stable(page, timeout=10000)
 
-        # ─── Live View Stream ────────────────────────────────────────
-        import threading
-        import base64
-        import redis
-        redis_client = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
-        stream_active = True
-
-        def screenshot_loop():
-            while stream_active:
-                try:
-                    if page and not page.is_closed():
-                        screenshot_bytes = page.screenshot(type="jpeg", quality=40)
-                        b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-                        redis_client.publish("live_view", b64)
-                except Exception:
-                    pass
-                time.sleep(1.0) # 1 FPS
-
-        t = threading.Thread(target=screenshot_loop, daemon=True)
-        t.start()
+        # Live View will now be handled inside human.py's random_delay function safely.
 
         try:
             # ─── Verify Session ──────────────────────────────────────

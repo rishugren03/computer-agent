@@ -43,14 +43,14 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/ghost_os
     env_file:
-      - .env.example
+      - .env
 
   agent-api:
     build:
       context: ./apps/agent-worker
       dockerfile: Dockerfile
     container_name: ghost-os-agent-api
-    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--ws", "wsproto"]
     ports:
       - "8000:8000"
     depends_on:
@@ -62,7 +62,25 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/ghost_os
     env_file:
-      - .env.example
+      - .env
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    container_name: ghost-os-dashboard
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/ghost_os
+      - REDIS_URL=redis://redis:6379/0
+    env_file:
+      - apps/dashboard/.env
 
 volumes:
   postgres_data:

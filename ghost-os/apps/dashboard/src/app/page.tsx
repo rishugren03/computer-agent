@@ -7,33 +7,83 @@ export default function CampaignDashboard() {
   const [status, setStatus] = useState('Idle')
   const [taskId, setTaskId] = useState('')
   const [liveStream, setLiveStream] = useState<string | null>(null)
+  const [isManualMode, setIsManualMode] = useState(false)
   
   const wsRef = useRef<WebSocket | null>(null)
+  const imageRef = useRef<HTMLImageElement>(null)
 
   useEffect(() => {
-    // Connect to FastAPI WebSocket for the Live View
-    const ws = new WebSocket('ws://localhost:8000/ws/live')
-    
-    ws.onopen = () => {
-      console.log('Connected to Ghost-OS Live View Stream')
-      wsRef.current = ws
-    }
-    
-    ws.onmessage = (event) => {
-      // The worker pushes base64 jpeg frames natively via Redis PubSub
-      setLiveStream(`data:image/jpeg;base64,${event.data}`)
-      setStatus('Running')
-    }
-    
-    ws.onclose = () => {
-      console.log('Live View Stream Disconnected')
-      wsRef.current = null
+    const connect = () => {
+      // Unified Agent WebSocker
+      const ws = new WebSocket('ws://localhost:8000/ws/agent')
+      
+      ws.onopen = () => {
+        console.log('Connected to Ghost-OS Unified Stream')
+        wsRef.current = ws
+      }
+      
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data)
+          if (msg.type === 'screen') {
+            setLiveStream(`data:image/jpeg;base64,${msg.data}`)
+            setStatus((prev) => (prev === 'Idle' || prev === 'Starting...') ? 'Running' : prev)
+          } else if (msg.type === 'status') {
+            const agentStatus = msg.data
+            console.log('Agent Status:', agentStatus)
+            if (agentStatus === 'manual_login_required') {
+              setIsManualMode(true)
+              setStatus('Manual Login Required')
+            } else if (agentStatus === 'running') {
+              setIsManualMode(false)
+              setStatus('Running')
+            }
+          }
+        } catch (e) {
+          console.error('Error parsing WS message:', e)
+        }
+      }
+      
+      ws.onclose = () => {
+        console.log('Stream Disconnected')
+        wsRef.current = null
+        setTimeout(connect, 3000)
+      }
     }
 
+    connect()
+
     return () => {
-      if (wsRef.current) wsRef.current.close()
+      wsRef.current?.close()
     }
   }, [])
+
+  const handleImageClick = (e: React.MouseEvent<HTMLImageElement>) => {
+    if (!isManualMode || !imageRef.current || !wsRef.current) return
+
+    const rect = imageRef.current.getBoundingClientRect()
+    
+    // Improved coordinate mapping:
+    // We scale the click based on the actual image resolution (naturalWidth/Height)
+    // and its displayed size on screen (rect.width/height).
+    const scaleX = imageRef.current.naturalWidth / rect.width
+    const scaleY = imageRef.current.naturalHeight / rect.height
+    
+    const x = Math.round((e.clientX - rect.left) * scaleX)
+    const y = Math.round((e.clientY - rect.top) * scaleY)
+
+    wsRef.current.send(JSON.stringify({ type: 'click', x, y }))
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (!isManualMode || !wsRef.current) return
+    
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "Tab", "Enter"].includes(e.code)) {
+      e.preventDefault()
+    }
+
+    wsRef.current.send(JSON.stringify({ type: 'key', key: e.key }))
+  }
 
   const startCampaign = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -50,6 +100,25 @@ export default function CampaignDashboard() {
       if (data.status === 'success') {
         setTaskId(data.task_id)
         setStatus('Waking up worker node...')
+      } else {
+        setStatus('Error: ' + data.message)
+      }
+    } catch (err: any) {
+      setStatus('Failed to connect to agent-api: ' + err.message)
+    }
+  }
+
+  const stopCampaign = async () => {
+    setStatus('Stopping...')
+    try {
+      const res = await fetch('http://localhost:8000/stop-campaign', {
+        method: 'POST'
+      })
+      const data = await res.json()
+      if (data.status === 'success') {
+        setStatus('Stopped')
+        setTaskId('')
+        setLiveStream(null)
       } else {
         setStatus('Error: ' + data.message)
       }
@@ -98,13 +167,23 @@ export default function CampaignDashboard() {
                 />
               </div>
               
-              <button 
-                type="submit"
-                disabled={status === 'Starting...' || status.includes('Waking')}
-                className="w-full py-3 px-4 bg-gradient-to-r from-indigo-500 to-cyan-500 hover:from-indigo-400 hover:to-cyan-400 hover:shadow-[0_0_20px_rgba(99,102,241,0.4)] transition-all rounded-lg font-semibold text-white tracking-wide shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Launch Campaign
-              </button>
+              <div className="flex gap-4">
+                <button 
+                  type="submit"
+                  disabled={status === 'Starting...' || status.includes('Waking')}
+                  className="flex-1 py-3 px-4 bg-gradient-to-r from-indigo-500 to-cyan-500 hover:from-indigo-400 hover:to-cyan-400 hover:shadow-[0_0_20px_rgba(99,102,241,0.4)] transition-all rounded-lg font-semibold text-white tracking-wide shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Launch Campaign
+                </button>
+                <button 
+                  type="button"
+                  onClick={stopCampaign}
+                  disabled={status !== 'Running' && status !== 'Waking up worker node...'}
+                  className="flex-1 py-3 px-4 bg-gradient-to-r from-rose-500 to-red-500 hover:from-rose-400 hover:to-red-400 hover:shadow-[0_0_20px_rgba(244,63,94,0.4)] transition-all rounded-lg font-semibold text-white tracking-wide shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Stop Campaign
+                </button>
+              </div>
             </form>
 
             {taskId && (
@@ -114,19 +193,25 @@ export default function CampaignDashboard() {
             )}
           </div>
 
-          {/* Live View */}
-          <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-2xl flex flex-col">
+          {/* Live View - Now Full Width and Taller */}
+          <div className="lg:col-span-3 bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-2xl flex flex-col">
             <h2 className="text-xl font-semibold mb-6 flex items-center gap-2">
               <span className="p-2 bg-rose-500/20 text-rose-400 rounded-md shadow-inner">🔴</span>
               Live View Stream
             </h2>
             
-            <div className="flex-1 bg-black rounded-lg border border-slate-800 overflow-hidden relative shadow-inner min-h-[400px] flex items-center justify-center group overflow-y-auto aspect-video">
+            <div 
+              className={`flex-1 bg-black rounded-lg border ${isManualMode ? 'border-amber-500 shadow-[0_0_20px_rgba(245,158,11,0.5)]' : 'border-slate-800'} overflow-hidden relative shadow-inner min-h-[700px] flex items-center justify-center group overflow-y-auto aspect-video cursor-crosshair outline-none`}
+              tabIndex={0}
+              onKeyDown={handleKeyDown}
+            >
               {liveStream ? (
                 <img 
+                  ref={imageRef}
                   src={liveStream} 
                   alt="Agent Live Feed" 
-                  className="w-full h-full object-contain"
+                  className="w-full h-full object-fill"
+                  onClick={handleImageClick}
                 />
               ) : (
                 <div className="text-center space-y-4">
@@ -139,8 +224,16 @@ export default function CampaignDashboard() {
                 </div>
               )}
               
+              {isManualMode && (
+                <div className="absolute inset-0 bg-amber-500/10 pointer-events-none flex items-start justify-center pt-4">
+                  <div className="px-4 py-2 bg-amber-600 text-white text-sm font-bold rounded-full shadow-lg animate-bounce flex items-center gap-2">
+                    <span>⚠️</span> MANUAL LOGIN REQUIRED — CLICK TO INTERACT
+                  </div>
+                </div>
+              )}
+
               <div className="absolute top-4 right-4 px-3 py-1 bg-black/60 backdrop-blur-md text-xs font-mono rounded text-slate-300 border border-slate-700/50 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity">
-                WS: ACTIVE | LATENCY: &lt;50ms
+                WS: ACTIVE | INTERACTIVE: {isManualMode ? 'YES' : 'NO'}
               </div>
             </div>
             
