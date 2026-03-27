@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from config import (
     GEMINI_API_KEY,
     GEMINI_VISION_MODEL,
+    GEMINI_FAST_MODEL,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
@@ -241,6 +242,45 @@ Return ONLY valid JSON. No explanation."""
         return None
 
 
+def get_element_coordinates_fast(screenshot_path, target_description):
+    """Vision-Coordinate Module for Speculative Execution.
+    
+    Downscales screenshot to 720p to save tokens and latency, then
+    asks Flash-Lite for coordinates.
+    """
+    # Downscale image to 720p height (maintaining aspect ratio)
+    try:
+        img = Image.open(screenshot_path)
+        # Calculate aspect ratio
+        w, h = img.size
+        # Limit height to 720p
+        target_h = 720
+        if h > target_h:
+            target_w = int(w * (target_h / h))
+            img = img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            img.save(screenshot_path)
+    except Exception as e:
+        print(f"[Vision] Error downscaling screenshot: {e}")
+    prompt = f"Return ONLY the [x, y] center coordinates of the {target_description} in JSON format: {{'x': 123, 'y': 456}}."
+    
+    response_text = analyze_image(screenshot_path, prompt)
+    if not response_text:
+        return None
+    try:
+        cleaned = response_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+        result = json.loads(cleaned)
+        if "x" in result and "y" in result:
+            return {"x": result["x"], "y": result["y"], "label": target_description, "found": True}
+        return None
+    except json.JSONDecodeError:
+        return None
+
+
 # ─── DeepSeek Text: Action Decisions ────────────────────────────────────────
 
 LINKEDIN_SYSTEM_PROMPT = """You are GhostAgent, an intelligent LinkedIn navigation assistant.
@@ -264,14 +304,14 @@ Your job is to decide the SINGLE NEXT ACTION to take.
 ```
 
 ## Rules for LinkedIn
-1. NEVER go directly to a profile URL. Always use search → click.
-2. Before connecting, always VIEW the profile first (scroll through it).
-3. When typing connection notes, be genuine and personalized.
-4. If you see a modal/popup, deal with it before proceeding.
-5. Prefer using visible element labels over coordinates when possible.
-6. If stuck, try scrolling or pressing Escape to dismiss overlays.
-7. Never rush — always include natural pauses between actions.
-8. If the same action fails twice, try an alternative approach.
+1. Prioritize **Speed of Action**. Do not wait for images to load if the buttons are visible.
+2. If a modal pops up (e.g., 'Verification' or 'Feedback'), handle it instantly using Vision rather than crashing.
+3. Keep the conversation history short. Clear the token buffer every 5 actions to keep latency at 'Flash-Lite' peak performance.
+4. NEVER go directly to a profile URL. Always use search → click.
+5. Before connecting, always VIEW the profile first (scroll through it).
+6. When typing connection notes, be genuine and personalized.
+7. Prefer using visible element labels over coordinates when possible.
+8. If stuck, try scrolling or pressing Escape to dismiss overlays.
 
 ## Response Format
 Return ONLY valid JSON. No explanation, no markdown, no extra text.
@@ -317,17 +357,13 @@ What is the SINGLE next action to take? Return ONLY JSON."""
 
     for attempt in range(MAX_RETRIES):
         try:
-            response = deepseek_client.chat.completions.create(
-                model=DEEPSEEK_MODEL,
-                messages=[
-                    {"role": "system", "content": LINKEDIN_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=500,
-                temperature=0.3,
+            prompt_content = f"{LINKEDIN_SYSTEM_PROMPT}\n\n{user_prompt}"
+            response = gemini_client.models.generate_content(
+                model=GEMINI_FAST_MODEL,
+                contents=prompt_content,
             )
 
-            text = response.choices[0].message.content.strip()
+            text = response.text.strip()
 
             # Clean JSON from markdown blocks
             if text.startswith("```"):

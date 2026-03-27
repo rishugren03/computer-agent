@@ -43,6 +43,8 @@ from ghostwriter import generate_connection_note, generate_comment, generate_rep
 from approval_queue import ApprovalQueue
 from diversity import DiversityEngine
 from vision import describe_page
+from linkedin.kill_switch import start_monitor
+import linkedin.kill_switch as ks
 
 
 def run_agent(prospects=None, continuous=False):
@@ -121,6 +123,10 @@ def run_agent(prospects=None, continuous=False):
 
             print("[Agent] ✅ Session verified")
 
+            # ─── Initialize Ghost Inbox Monitor (Kill Switch) ────────
+            ks.ABORT_AUTOMATION = False
+            monitor_thread = start_monitor(context)
+
             # ─── Check Warmup ────────────────────────────────────────
 
             if not warmup.is_complete:
@@ -149,6 +155,10 @@ def run_agent(prospects=None, continuous=False):
             print(f"[Agent] Session duration: {session_duration // 60}min")
 
             # Step 1: Organic feed engagement (already on feed from open_browser)
+            if ks.ABORT_AUTOMATION:
+                print("[Agent] 🚨 KILL SWITCH ACTIVATED — Aborting Session")
+                close_browser(context, playwright)
+                return
             print("\n[Agent] 📱 Organic feed engagement...")
             organic_feed_engagement(
                 page,
@@ -173,6 +183,10 @@ def run_agent(prospects=None, continuous=False):
                 return
 
             # Step 2: Process approval queue (send approved connections)
+            if ks.ABORT_AUTOMATION:
+                print("[Agent] 🚨 KILL SWITCH ACTIVATED — Aborting Session")
+                close_browser(context, playwright)
+                return
             approved = queue.get_approved()
             if approved:
                 if not check_session_or_relogin(page):
@@ -225,6 +239,10 @@ def run_agent(prospects=None, continuous=False):
                     continue
 
                 print("\n[Agent] 📬 Checking inbox...")
+                if ks.ABORT_AUTOMATION:
+                    print("[Agent] 🚨 KILL SWITCH ACTIVATED — Aborting Session")
+                    close_browser(context, playwright)
+                    return
                 inbox_summary = process_inbox(
                     page,
                     reply_generator=lambda name, msg, intent: generate_reply(name, msg, intent, persona),
