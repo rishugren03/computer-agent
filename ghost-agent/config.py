@@ -46,8 +46,8 @@ DETOUR_PROBABILITY = 0.30          # 30% chance of "distraction" navigation
 
 # ─── Mouse Simulation ───────────────────────────────────────────────────────
 
-CLICK_DURATION_MIN_MS = 75         # Minimum click hold (mouse down → up)
-CLICK_DURATION_MAX_MS = 200        # Maximum click hold
+CLICK_DURATION_MIN_MS = 50         # Minimum click hold (micro-hesitation minimum)
+CLICK_DURATION_MAX_MS = 150        # Maximum click hold (micro-hesitation maximum)
 OVERSHOOT_PROBABILITY = 0.20       # 20% of clicks overshoot then correct
 OVERSHOOT_MIN_PX = 5
 OVERSHOOT_MAX_PX = 15
@@ -65,12 +65,9 @@ PUNCTUATION_PAUSE_MAX_MS = 600
 
 # ─── LLM Configuration ──────────────────────────────────────────────────────
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.0-flash")
+GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", "gemini-3.1-flash-lite")
+GEMINI_PRO_MODEL = os.getenv("GEMINI_PRO_MODEL", "gemini-3.1-pro")
 
 # ─── Proxy Configuration ────────────────────────────────────────────────────
 
