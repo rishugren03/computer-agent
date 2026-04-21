@@ -1,19 +1,12 @@
-"""Anti-ban guardrails for GhostAgent.
+"""Anti-ban guardrails backed by Postgres (atomic, race-condition-free).
 
-These are HARD-CODED safety limits that CANNOT be overridden by user config.
-They prevent LinkedIn from flagging the account as automated.
-
-All limits are tracked in SQLite for reliable cross-session persistence.
+Hard-coded safety limits that CANNOT be overridden by user config.
+Uses SELECT FOR UPDATE so two concurrent workers cannot both pass the same limit.
 """
 
-import sqlite3
-import os
-import time
 from datetime import datetime, timezone
-
+import db
 from config import (
-    GUARDRAILS_DB,
-    DATA_DIR,
     MAX_CONNECTIONS_PER_DAY,
     MAX_PROFILE_VIEWS_PER_DAY,
     MAX_MESSAGES_PER_DAY,
@@ -23,175 +16,44 @@ from config import (
 
 
 class Guardrails:
-    """Rate limiter that prevents exceeding LinkedIn's detection thresholds.
+    def __init__(self, account_id: str):
+        self.account_id = account_id
 
-    All checks are mandatory. The agent MUST call can_* methods
-    before performing any action.
-    """
-
-    def __init__(self, db_path=None):
-        self.db_path = db_path or GUARDRAILS_DB
-        os.makedirs(os.path.dirname(self.db_path) or DATA_DIR, exist_ok=True)
-        self._init_db()
-
-    def _init_db(self):
-        """Initialize the SQLite database for action tracking."""
-        conn = self._get_conn()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS actions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                action_type TEXT NOT NULL,
-                timestamp REAL NOT NULL,
-                date_key TEXT NOT NULL,
-                metadata TEXT DEFAULT ''
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_actions_date 
-            ON actions(date_key, action_type)
-        """)
-        conn.commit()
-        conn.close()
-
-    def _get_conn(self):
-        return sqlite3.connect(self.db_path)
-
-    def _today_key(self):
-        """Get today's date key in YYYY-MM-DD format (UTC)."""
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    def _get_daily_count(self, action_type):
-        """Get today's count for an action type."""
-        conn = self._get_conn()
-        cursor = conn.execute(
-            "SELECT COUNT(*) FROM actions WHERE date_key = ? AND action_type = ?",
-            (self._today_key(), action_type)
-        )
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count
-
-    # ─── Permission Checks ───────────────────────────────────────────────
-
-    def can_connect(self):
-        """Check if a connection request can be sent.
-
-        Returns:
-            bool: True if under the daily limit of {MAX_CONNECTIONS_PER_DAY}.
-        """
-        count = self._get_daily_count("connection")
-        allowed = count < MAX_CONNECTIONS_PER_DAY
+    def _check(self, column: str, limit: int, label: str) -> bool:
+        allowed = db.guardrail_check_and_increment(self.account_id, column, limit)
         if not allowed:
-            print(f"[Guardrails] ⛔ Connection limit reached ({count}/{MAX_CONNECTIONS_PER_DAY})")
+            counts = db.get_guardrail_counts(self.account_id)
+            current = counts.get(column.replace("Count", "s").lower(), "?")
+            print(f"[Guardrails] ⛔ {label} limit reached ({current}/{limit})")
         return allowed
 
-    def can_view_profile(self):
-        """Check if a profile view is allowed.
+    def can_connect(self) -> bool:
+        return self._check("connectionsCount", MAX_CONNECTIONS_PER_DAY, "Connection")
 
-        Returns:
-            bool: True if under the daily limit of {MAX_PROFILE_VIEWS_PER_DAY}.
-        """
-        count = self._get_daily_count("profile_view")
-        allowed = count < MAX_PROFILE_VIEWS_PER_DAY
-        if not allowed:
-            print(f"[Guardrails] ⛔ Profile view limit reached ({count}/{MAX_PROFILE_VIEWS_PER_DAY})")
-        return allowed
+    def can_view_profile(self) -> bool:
+        return self._check("profileViewsCount", MAX_PROFILE_VIEWS_PER_DAY, "Profile view")
 
-    def can_message(self):
-        """Check if a message can be sent.
+    def can_message(self) -> bool:
+        return self._check("messagesCount", MAX_MESSAGES_PER_DAY, "Message")
 
-        Returns:
-            bool: True if under the daily limit of {MAX_MESSAGES_PER_DAY}.
-        """
-        count = self._get_daily_count("message")
-        allowed = count < MAX_MESSAGES_PER_DAY
-        if not allowed:
-            print(f"[Guardrails] ⛔ Message limit reached ({count}/{MAX_MESSAGES_PER_DAY})")
-        return allowed
+    def can_like(self) -> bool:
+        return self._check("likesCount", MAX_LIKES_PER_DAY, "Like")
 
-    def can_like(self):
-        """Check if a like action is allowed."""
-        count = self._get_daily_count("like")
-        return count < MAX_LIKES_PER_DAY
+    def can_comment(self) -> bool:
+        return self._check("commentsCount", MAX_COMMENTS_PER_DAY, "Comment")
 
-    def can_comment(self):
-        """Check if a comment can be posted."""
-        count = self._get_daily_count("comment")
-        return count < MAX_COMMENTS_PER_DAY
-
-    # ─── Action Recording ────────────────────────────────────────────────
-
-    def record_action(self, action_type, metadata=""):
-        """Record that an action was performed.
-
-        Args:
-            action_type: One of: connection, profile_view, message, like, comment
-            metadata: Optional extra info (e.g., prospect name)
-        """
-        conn = self._get_conn()
-        conn.execute(
-            "INSERT INTO actions (action_type, timestamp, date_key, metadata) VALUES (?, ?, ?, ?)",
-            (action_type, time.time(), self._today_key(), metadata)
-        )
-        conn.commit()
-        conn.close()
-
-    # ─── Stats ───────────────────────────────────────────────────────────
-
-    def get_daily_stats(self):
-        """Get today's action counts for all types.
-
-        Returns:
-            dict: Counts and limits for each action type.
-        """
+    def get_daily_stats(self) -> dict:
+        counts = db.get_guardrail_counts(self.account_id)
         return {
-            "connections": {
-                "used": self._get_daily_count("connection"),
-                "limit": MAX_CONNECTIONS_PER_DAY,
-            },
-            "profile_views": {
-                "used": self._get_daily_count("profile_view"),
-                "limit": MAX_PROFILE_VIEWS_PER_DAY,
-            },
-            "messages": {
-                "used": self._get_daily_count("message"),
-                "limit": MAX_MESSAGES_PER_DAY,
-            },
-            "likes": {
-                "used": self._get_daily_count("like"),
-                "limit": MAX_LIKES_PER_DAY,
-            },
-            "comments": {
-                "used": self._get_daily_count("comment"),
-                "limit": MAX_COMMENTS_PER_DAY,
-            },
-            "date": self._today_key(),
+            "connections": {"used": counts.get("connections", 0), "limit": MAX_CONNECTIONS_PER_DAY},
+            "profile_views": {"used": counts.get("profileViews", 0), "limit": MAX_PROFILE_VIEWS_PER_DAY},
+            "messages": {"used": counts.get("messages", 0), "limit": MAX_MESSAGES_PER_DAY},
+            "likes": {"used": counts.get("likes", 0), "limit": MAX_LIKES_PER_DAY},
+            "comments": {"used": counts.get("comments", 0), "limit": MAX_COMMENTS_PER_DAY},
+            "date": counts.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d")),
         }
 
-    def get_weekly_stats(self):
-        """Get action counts for the past 7 days."""
-        conn = self._get_conn()
-        cursor = conn.execute("""
-            SELECT date_key, action_type, COUNT(*) 
-            FROM actions 
-            WHERE timestamp > ?
-            GROUP BY date_key, action_type
-            ORDER BY date_key DESC
-        """, (time.time() - 7 * 86400,))
-
-        rows = cursor.fetchall()
-        conn.close()
-
-        stats = {}
-        for date_key, action_type, count in rows:
-            if date_key not in stats:
-                stats[date_key] = {}
-            stats[date_key][action_type] = count
-
-        return stats
-
     def print_daily_stats(self):
-        """Print a formatted daily stats summary."""
         stats = self.get_daily_stats()
         print("\n📊 Daily Usage:")
         print(f"  Connections:   {stats['connections']['used']}/{stats['connections']['limit']}")
@@ -199,3 +61,7 @@ class Guardrails:
         print(f"  Messages:      {stats['messages']['used']}/{stats['messages']['limit']}")
         print(f"  Likes:         {stats['likes']['used']}/{stats['likes']['limit']}")
         print(f"  Comments:      {stats['comments']['used']}/{stats['comments']['limit']}")
+
+    # Legacy compatibility shims — agent code calls record_action() in some paths
+    def record_action(self, action_type: str, metadata: str = ""):
+        pass  # Now handled atomically in can_* methods

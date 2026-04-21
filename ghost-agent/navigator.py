@@ -11,6 +11,7 @@ checking LinkedIn during a work break.
 
 import random
 import time
+import json
 import sys
 import os
 
@@ -27,10 +28,11 @@ from human import (
     dwell_on_content,
 )
 from browser import take_screenshot, wait_for_stable
-from accessibility import extract_act, find_buttons, find_links, find_textboxes
+from accessibility import extract_act, find_buttons, find_links, find_textboxes, get_ax_snapshot, assign_agent_ids
 from config import DETOUR_PROBABILITY, SCREENSHOT_DIR
 from semantic_map import SemanticMap
 from self_healing_bridge import heal_selector
+from vision import describe_page, decide_action_orchestrated, verify_action_async
 
 # Module-level semantic cache singleton
 _smap = SemanticMap()
@@ -447,3 +449,112 @@ def _click_act_element(page, act_node):
 
     except Exception as e:
         print(f"[Navigator] Error clicking ACT element ({role}:{name}): {e}")
+
+
+def autonomous_move(page, goal, action_history=None):
+    """Execute a single autonomous move using Navigator-Pilot orchestration.
+    
+    1. Perception: AXTree Snapshot (with IDs) + Screenshot Description.
+    2. Orchestration: Navigator (Strategy) + Pilot (Execution).
+    3. Action: Execute the Pilot's decision.
+    """
+    print(f"[Navigator] 🤖 Autonomous Move | Goal: {goal}")
+    
+    # ─── 1. Perception ──────────────────────────────────────────────────────
+    
+    # Assign agent IDs to the DOM
+    assign_agent_ids(page)
+    
+    # Take snapshot (YAML)
+    ax_tree_yaml = get_ax_snapshot(page)
+    
+    # Describe page (Screenshot)
+    screenshot_path = os.path.join(SCREENSHOT_DIR, f"auto_move_{int(time.time())}.png")
+    take_screenshot(page, screenshot_path)
+    page_desc = describe_page(screenshot_path)
+    
+    # ─── 2. Orchestration ────────────────────────────────────────────────────
+    
+    action = decide_action_orchestrated(goal, ax_tree_yaml, page_desc, action_history)
+    print(f"[Navigator] 🎯 Action Decided: {json.dumps(action)}")
+    
+    # ─── 3. Action ──────────────────────────────────────────────────────────
+    
+    if not action:
+        return None
+        
+    act = action.get("action")
+    agent_id = action.get("id")
+    
+    try:
+        if act == "click" and agent_id:
+            loc = page.locator(f'[data-agent-id="{agent_id}"]').first
+            bbox = loc.bounding_box()
+            if bbox:
+                cx = bbox["x"] + bbox["width"] / 2
+                cy = bbox["y"] + bbox["height"] / 2
+                human_click(page, cx, cy)
+            else:
+                loc.click()
+                
+        elif act == "type" and agent_id:
+            text = action.get("text", "")
+            loc = page.locator(f'[data-agent-id="{agent_id}"]').first
+            loc.click() # Focus
+            human_type(page, text)
+            
+        elif act == "scroll":
+            direction = action.get("direction", "down")
+            amount = action.get("amount", 500)
+            human_scroll(page, direction, amount)
+            
+        elif act == "wait":
+            seconds = action.get("seconds", 2)
+            time.sleep(seconds)
+            
+        elif act == "done":
+            print(f"[Navigator] ✅ Goal Achieved: {action.get('reason', 'completed')}")
+            return action
+            
+        # Record action in history
+        if action_history is not None:
+            action_history.append(action)
+            
+        # ─── 4. Asynchronous Verification (Blocking loop for security) ──────
+        
+        # We verify the action immediately after execution for high-fidelity safety
+        verification = verify_action_async(page, action, f"Executed {act} on {agent_id or 'page'}")
+        if verification.get("roadblock"):
+            print(f"[Navigator] 🛑 ROADBLOCK DETECTED: {verification.get('details')}")
+            # In a real system, this would trigger an AbortController or high-priority interrupt
+            return {"action": "interrupt", "reason": "roadblock", "details": verification.get("details")}
+            
+        return action
+        
+    except Exception as e:
+        print(f"[Navigator] ❌ Action Execution Failed: {e}")
+        return {"action": "error", "error": str(e)}
+
+
+def fast_connect(page, profile_url, note=None):
+    """Execute the high-speed LinkedIn connection macro.
+    
+    This uses the 'ghost_macros.sendInviteMacro' injected in browser.py
+    to handle the multi-step connection flow in a single JS execution.
+    """
+    print(f"[Navigator] 🚀 Fast-Connect Macro | Target: {profile_url}")
+    
+    # Ensure we are on the profile page
+    if profile_url not in page.url:
+        page.goto(profile_url, wait_until="domcontentloaded")
+        wait_for_stable(page)
+        
+    # Apply stealth jitter before the macro
+    from human import apply_interaction_jitter
+    apply_interaction_jitter(page)
+    
+    # Execute the macro
+    result = page.evaluate(f"window.ghost_macros.sendInviteMacro(`{note or ''}`)")
+    print(f"[Navigator] 🏁 Macro Result: {json.dumps(result)}")
+    
+    return result

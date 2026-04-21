@@ -7,6 +7,7 @@ Simulates a real professional using LinkedIn:
 - Inertial scrolling that mimics trackpad physics
 - Content-aware dwell time (reading simulation)
 - Idle fidget movements during pauses
+- Human interaction jitter for enhanced stealth
 """
 
 import random
@@ -399,3 +400,24 @@ def dwell_on_content(page, word_count):
     """Simulate a human reading content: idle fidget for reading_delay duration."""
     delay = reading_delay(word_count)
     idle_fidget(page, delay)
+
+
+def apply_interaction_jitter(page):
+    """Apply a burst of human-like jitter to the current session.
+    
+    Includes:
+    - Micro-movements of the mouse
+    - Brief random scroll
+    - Idle fidgeting
+    
+    This is called periodically to keep the session looking human-active.
+    """
+    import random
+    
+    # 30% chance of a small fidget
+    if random.random() < 0.3:
+        idle_fidget(page, random.uniform(0.5, 1.5))
+    
+    # 10% chance of a micro-scroll
+    if random.random() < 0.1:
+        human_scroll(page, random.choice(["up", "down"]), random.randint(30, 100))

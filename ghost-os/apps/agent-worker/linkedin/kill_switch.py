@@ -1,77 +1,114 @@
-"""The Ghost Inbox Monitor — High-speed Kill Switch.
-Polls the LinkedIn messaging thread in the background using Vision.
-If a new message indicator is detected via Gemini Flash-Lite, it triggers
-an immediate abort of all automation.
+"""Ghost Inbox Monitor — background kill switch.
+
+Polls LinkedIn messaging on a hidden page using vision.
+If a new message is detected, sets ABORT_AUTOMATION = True and signals the stop event.
+
+Hardened version:
+- Accepts a threading.Event for clean shutdown (no daemon thread races)
+- Full exception handling inside the poll loop — one vision error doesn't kill the monitor
+- Page-closed detection exits gracefully
 """
+
 import threading
 import time
-import sys
 import os
 import json
+import sys
 
-# Ensure parent directory is in path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from vision import analyze_image
 from config import SCREENSHOT_DIR
 
-# Global Kill Switch State
 ABORT_AUTOMATION = False
 
-def ghost_inbox_monitor_loop(context):
-    """Background polling loop for the kill switch."""
+_POLL_INTERVAL = 15  # seconds between inbox checks
+_INBOX_MONITOR_PROMPT = (
+    "Look at this LinkedIn inbox screenshot. "
+    "Are there any unread message indicators (green dot, bold name, unread count badge) visible? "
+    'Return ONLY JSON: {"unread_detected": true} or {"unread_detected": false}'
+)
+
+
+def ghost_inbox_monitor_loop(context, stop_event: threading.Event):
+    """Poll LinkedIn inbox for new messages until stop_event is set.
+
+    Designed to be re-entrant: if an exception occurs, the caller (agent.py's
+    _robust_inbox_monitor) can restart this function safely.
+    """
     global ABORT_AUTOMATION
-    
-    print("[Kill Switch] 🛡️ Starting Ghost Inbox Monitor thread...")
-    
+
+    print("[KillSwitch] 🛡️ Inbox monitor started")
+    page = None
+
     try:
-        # Open a hidden page for inbox monitoring
         page = context.new_page()
-        page.goto("https://www.linkedin.com/messaging/", wait_until="commit")
-        
-        while not ABORT_AUTOMATION:
+        page.goto("https://www.linkedin.com/messaging/", wait_until="commit", timeout=15000)
+    except Exception as e:
+        print(f"[KillSwitch] Could not open messaging page: {e}")
+        return
+
+    try:
+        while not stop_event.is_set() and not ABORT_AUTOMATION:
+            if stop_event.wait(timeout=_POLL_INTERVAL):
+                break  # stop_event was set during sleep
+
             try:
-                # Refresh periodically to get new messages
-                time.sleep(15) 
-                
-                # Take screenshot
                 screenshot_path = os.path.join(SCREENSHOT_DIR, "inbox_monitor.png")
+                os.makedirs(SCREENSHOT_DIR, exist_ok=True)
                 page.screenshot(path=screenshot_path)
-                
-                # Use Gemini Flash-Lite to detect unread markers
-                prompt = "Look at this LinkedIn inbox screenshot. Are there any 'New Message' indicators (like a green dot or unread count badge) visible? Return ONLY a JSON object: {\"unread_detected\": true/false}."
-                
-                response_text = analyze_image(screenshot_path, prompt)
-                
+
+                response_text = analyze_image(screenshot_path, _INBOX_MONITOR_PROMPT)
                 if response_text:
                     cleaned = response_text.strip()
                     if cleaned.startswith("```"):
-                        cleaned = cleaned.split("\n", 1)[1]
-                        if cleaned.endswith("```"):
-                            cleaned = cleaned[:-3]
-                        cleaned = cleaned.strip()
-                    
+                        cleaned = cleaned.split("\n", 1)[1].rstrip("`").strip()
                     try:
                         result = json.loads(cleaned)
                         if result.get("unread_detected"):
-                            print("\n[Kill Switch] 🚨 NEW MESSAGE DETECTED BY VISION! INITIATING IMMEDIATE ABORT 🚨")
+                            print("[KillSwitch] 🚨 NEW MESSAGE — aborting automation")
                             ABORT_AUTOMATION = True
+                            stop_event.set()
                             break
                     except json.JSONDecodeError:
-                        pass
-                
-                page.reload(wait_until="commit")
-                
+                        pass  # Vision returned something unparseable — not fatal
+
+                # Reload page to get fresh state
+                page.reload(wait_until="commit", timeout=10000)
+
             except Exception as e:
-                # Page closed or context destroyed
-                print(f"[Kill Switch] Loop error: {e}")
-                break
-                
-    except Exception as e:
-        print(f"[Kill Switch] Failed to initialize: {e}")
-        
-def start_monitor(context):
-    """Launch the Ghost Inbox Monitor in a background thread."""
-    thread = threading.Thread(target=ghost_inbox_monitor_loop, args=(context,), daemon=True)
+                # Page closed or context destroyed — stop monitoring
+                if "Target page, context or browser has been closed" in str(e):
+                    break
+                print(f"[KillSwitch] Poll error (continuing): {e}")
+
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+        print("[KillSwitch] Monitor stopped")
+
+
+def start_monitor(context, stop_event: threading.Event = None) -> threading.Thread:
+    """Launch the inbox monitor in a background thread.
+
+    Args:
+        context: Playwright browser context.
+        stop_event: Optional threading.Event to stop the monitor from outside.
+                    If not provided, a new one is created and returned via the thread.
+
+    Returns:
+        The monitor thread (already started).
+    """
+    if stop_event is None:
+        stop_event = threading.Event()
+
+    thread = threading.Thread(
+        target=ghost_inbox_monitor_loop,
+        args=(context, stop_event),
+        daemon=False,  # Not daemon — we want clean shutdown via stop_event
+        name="GhostKillSwitch",
+    )
     thread.start()
     return thread

@@ -1,11 +1,7 @@
-"""Enhanced stealth browser for GhostAgent.
+"""Stealth browser for GhostAgent.
 
-Built on Patchright (undetected Playwright fork) with:
-- Static residential proxy integration
-- GPS / geolocation spoofing
-- Viewport randomization per session
-- User-agent rotation
-- Timezone + locale sync
+Per-account Redis channels: live_view_{account_id} and agent_status_{account_id}
+so multiple users can have independent live view streams.
 """
 
 from patchright.sync_api import sync_playwright
@@ -14,6 +10,7 @@ import os
 import time
 import json
 import base64
+import threading
 import redis
 
 from config import (
@@ -31,45 +28,49 @@ from config import (
 )
 
 
-def open_browser(url="https://www.linkedin.com"):
-    """Launch a stealth Chromium browser with full anti-detection config.
+def open_browser(url="https://www.linkedin.com", cookies: dict = None, account_id: str = None):
+    """Launch a stealth Chromium browser.
+
+    Args:
+        url: Initial URL to navigate to.
+        cookies: Optional {li_at, JSESSIONID} to inject immediately.
+        account_id: Used to isolate browser data dir and Redis channels per user.
 
     Returns:
-        tuple: (page, context, playwright) — caller must manage lifecycle.
+        tuple: (page, context, playwright)
     """
     p = sync_playwright().start()
 
-    user_data_dir = os.path.join(os.getcwd(), BROWSER_DATA_DIR)
+    # Per-account browser data dir so sessions don't bleed between users
+    base_dir = os.path.join(os.getcwd(), BROWSER_DATA_DIR)
+    if account_id:
+        user_data_dir = os.path.join(base_dir, f"account_{account_id}")
+    else:
+        user_data_dir = base_dir
     os.makedirs(user_data_dir, exist_ok=True)
 
-    # Store fingerprint per session to prevent LinkedIn's security detection
+    # Persistent fingerprint per account
     fingerprint_file = os.path.join(user_data_dir, "fingerprint.json")
     if os.path.exists(fingerprint_file):
         try:
-            with open(fingerprint_file, "r") as f:
-                fp = json.load(f)
+            fp = json.loads(open(fingerprint_file).read())
             width = fp.get("width", VIEWPORT_BASE_WIDTH)
             height = fp.get("height", VIEWPORT_BASE_HEIGHT)
             user_agent = fp.get("user_agent", random.choice(USER_AGENTS))
-            print(f"[Browser] ℹ️ Loaded persistent fingerprint for this session.")
-        except Exception as e:
-            print(f"[Browser] ⚠️ Error loading fingerprint: {e}")
+        except Exception:
             width = VIEWPORT_BASE_WIDTH + random.randint(-VIEWPORT_JITTER, VIEWPORT_JITTER)
             height = VIEWPORT_BASE_HEIGHT + random.randint(-VIEWPORT_JITTER, VIEWPORT_JITTER)
             user_agent = random.choice(USER_AGENTS)
     else:
-        # Create a new fingerprint for this fresh session
         width = VIEWPORT_BASE_WIDTH + random.randint(-VIEWPORT_JITTER, VIEWPORT_JITTER)
         height = VIEWPORT_BASE_HEIGHT + random.randint(-VIEWPORT_JITTER, VIEWPORT_JITTER)
         user_agent = random.choice(USER_AGENTS)
         try:
             with open(fingerprint_file, "w") as f:
                 json.dump({"width": width, "height": height, "user_agent": user_agent}, f)
-            print(f"[Browser] 🔒 Saved new device fingerprint for session persistence.")
-        except Exception as e:
-            print(f"[Browser] ⚠️ Error saving fingerprint: {e}")
+        except Exception:
+            pass
 
-    # Build launch options
     launch_args = {
         "user_data_dir": user_data_dir,
         "headless": True,
@@ -86,146 +87,153 @@ def open_browser(url="https://www.linkedin.com"):
             "--disable-popup-blocking",
         ],
         "permissions": ["geolocation"],
-        "geolocation": {
-            "latitude": USER_LATITUDE,
-            "longitude": USER_LONGITUDE,
-        },
+        "geolocation": {"latitude": USER_LATITUDE, "longitude": USER_LONGITUDE},
     }
 
-    # Add proxy if configured
     proxy_url = get_proxy_url()
     if proxy_url:
         launch_args["proxy"] = {"server": proxy_url}
 
     context = p.chromium.launch_persistent_context(**launch_args)
-
-    # Set geolocation permissions
     context.grant_permissions(["geolocation"])
 
-    # INJECT GHOST-OS DATABASE COOKIES
-    try:
-        from db import get_session_cookies
-        cookies = get_session_cookies()
-        if cookies and cookies.get('li_at'):
-            print("[Browser] 🍪 Injecting LinkedIn cookies from Postgres!")
-            context.add_cookies([
-                {"name": "li_at", "value": cookies['li_at'], "domain": ".www.linkedin.com", "path": "/"},
-                {"name": "JSESSIONID", "value": cookies['JSESSIONID'], "domain": ".www.linkedin.com", "path": "/"}
-            ])
-    except ImportError:
-        pass
+    # Inject cookies (from DB or caller)
+    if cookies and cookies.get("li_at"):
+        print("[Browser] 🍪 Injecting session cookies")
+        context.add_cookies([
+            {"name": "li_at", "value": cookies["li_at"], "domain": ".www.linkedin.com", "path": "/"},
+            {"name": "JSESSIONID", "value": cookies.get("JSESSIONID", ""), "domain": ".www.linkedin.com", "path": "/"},
+        ])
+    elif not cookies and not account_id:
+        # Legacy: try old DB function
+        try:
+            from db import get_session_cookies
+            legacy = get_session_cookies()
+            if legacy and legacy.get("li_at"):
+                context.add_cookies([
+                    {"name": "li_at", "value": legacy["li_at"], "domain": ".www.linkedin.com", "path": "/"},
+                    {"name": "JSESSIONID", "value": legacy.get("JSESSIONID", ""), "domain": ".www.linkedin.com", "path": "/"},
+                ])
+        except Exception:
+            pass
 
     page = context.pages[0] if context.pages else context.new_page()
 
-    # Inject a visual cursor and mouse position tracking for Bézier curves
-    # This runs on every page load automatically.
+    # Ghost macros + visual cursor
     context.add_init_script("""
-        // Track mouse globally
         document.addEventListener('mousemove', (e) => {
             window._mouseX = e.clientX;
             window._mouseY = e.clientY;
         }, { capture: true });
 
-        // Inject visual cursor when DOM is ready
         window.addEventListener('DOMContentLoaded', () => {
             if (document.getElementById('ghost-agent-cursor')) return;
-            
             const cursor = document.createElement('div');
             cursor.id = 'ghost-agent-cursor';
-            cursor.style.width = '16px';
-            cursor.style.height = '16px';
-            cursor.style.backgroundColor = 'rgba(255, 0, 0, 0.6)';
-            cursor.style.border = '2px solid white';
-            cursor.style.borderRadius = '50%';
-            cursor.style.position = 'fixed';
-            cursor.style.pointerEvents = 'none';
-            cursor.style.zIndex = '2147483647';
-            cursor.style.transform = 'translate(-50%, -50%)';
-            cursor.style.transition = 'transform 0.05s linear, background-color 0.1s';
-            // Start offscreen
-            cursor.style.left = '-100px';
-            cursor.style.top = '-100px';
+            Object.assign(cursor.style, {
+                width: '14px', height: '14px',
+                backgroundColor: 'rgba(255,0,0,0.6)',
+                border: '2px solid white',
+                borderRadius: '50%',
+                position: 'fixed',
+                pointerEvents: 'none',
+                zIndex: '2147483647',
+                transform: 'translate(-50%,-50%)',
+                transition: 'transform 0.05s linear, background-color 0.1s',
+                left: '-100px', top: '-100px',
+            });
             document.documentElement.appendChild(cursor);
-
-            document.addEventListener('mousemove', (e) => {
+            document.addEventListener('mousemove', e => {
                 cursor.style.left = e.clientX + 'px';
                 cursor.style.top = e.clientY + 'px';
             }, { capture: true });
-            
             document.addEventListener('mousedown', () => {
-                cursor.style.backgroundColor = 'rgba(0, 255, 0, 0.7)';
-                cursor.style.transform = 'translate(-50%, -50%) scale(0.7)';
+                cursor.style.backgroundColor = 'rgba(0,255,0,0.7)';
+                cursor.style.transform = 'translate(-50%,-50%) scale(0.7)';
             }, { capture: true });
-            
             document.addEventListener('mouseup', () => {
-                cursor.style.backgroundColor = 'rgba(255, 0, 0, 0.6)';
-                cursor.style.transform = 'translate(-50%, -50%) scale(1)';
+                cursor.style.backgroundColor = 'rgba(255,0,0,0.6)';
+                cursor.style.transform = 'translate(-50%,-50%) scale(1)';
             }, { capture: true });
+
+            window.ghost_macros = {
+                sendInviteMacro: async (note) => {
+                    const connectBtn = Array.from(document.querySelectorAll('button'))
+                        .find(b => b.innerText.includes('Connect') || b.getAttribute('aria-label')?.includes('Connect'));
+                    if (!connectBtn) return { success: false, reason: "Connect button not found" };
+                    connectBtn.click();
+                    let start = Date.now();
+                    while (Date.now() - start < 2000) {
+                        const addNoteBtn = Array.from(document.querySelectorAll('button'))
+                            .find(b => b.innerText.includes('Add a note'));
+                        if (addNoteBtn) { addNoteBtn.click(); break; }
+                        const sendNow = Array.from(document.querySelectorAll('button'))
+                            .find(b => b.innerText.includes('Send without a note'));
+                        if (sendNow && !note) { sendNow.click(); return { success: true, method: "direct" }; }
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+                    if (note) {
+                        start = Date.now();
+                        while (Date.now() - start < 1500) {
+                            const ta = document.querySelector('textarea#custom-message,textarea[name="message"]');
+                            if (ta) {
+                                ta.value = note;
+                                ta.dispatchEvent(new Event('input', { bubbles: true }));
+                                break;
+                            }
+                            await new Promise(r => setTimeout(r, 100));
+                        }
+                    }
+                    const sendBtn = Array.from(document.querySelectorAll('button'))
+                        .find(b => b.innerText.includes('Send') || b.getAttribute('aria-label')?.includes('Send invitation'));
+                    if (sendBtn) { sendBtn.click(); return { success: true }; }
+                    return { success: false, reason: "Send button not found" };
+                },
+                organicScroll: async (amount = 500) => {
+                    window.scrollBy({ top: amount, behavior: 'smooth' });
+                    return { success: true };
+                }
+            };
         });
     """)
 
     page.goto(url, wait_until="domcontentloaded")
-
     return page, context, p
 
 
 def take_screenshot(page, path=None):
-    """Take a screenshot of the visible viewport.
-
-    Args:
-        page: Playwright page instance.
-        path: File path for the screenshot. Defaults to SCREENSHOT_DIR/screenshot.png.
-
-    Returns:
-        str: Absolute path to the saved screenshot.
-    """
     if path is None:
         os.makedirs(SCREENSHOT_DIR, exist_ok=True)
         path = os.path.join(SCREENSHOT_DIR, "screenshot.png")
     else:
-        dir_name = os.path.dirname(path)
-        if dir_name:
-            os.makedirs(dir_name, exist_ok=True)
-
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
     page.screenshot(path=path, full_page=False)
     return path
 
 
 def wait_for_stable(page, timeout=5000):
-    """Wait for the page to become somewhat stable (fast execution).
-    
-    Uses a speculative approach:
-    1. Wait for 'commit' rather than 'networkidle' to allow vision to act earlier.
-    2. Brief additional wait for JS rendering.
-    """
     try:
         page.wait_for_load_state("commit", timeout=timeout)
     except Exception:
-        # Commit timeout, wait briefly
         time.sleep(1.5)
-
-    # Brief additional wait for any JS rendering to complete
     time.sleep(random.uniform(0.3, 0.8))
 
 
 def get_current_url(page):
-    """Get the current page URL."""
     return page.evaluate("() => window.location.href")
 
 
 def get_page_title(page):
-    """Get the current page title."""
     return page.evaluate("() => document.title")
 
 
 def is_linkedin(page):
-    """Check if the current page is on LinkedIn."""
-    url = get_current_url(page)
-    return "linkedin.com" in url
+    return "linkedin.com" in get_current_url(page)
 
 
 def close_browser(context, playwright):
-    """Gracefully close the browser and cleanup."""
     try:
         context.close()
     except Exception:
@@ -236,24 +244,84 @@ def close_browser(context, playwright):
         pass
 
 
-def broadcast_screen(page):
-    """Capture a screenshot of the current page and publish it to Redis.
-    
-    This is used to feed the Live View stream on the dashboard during
-    manual interactions or autonomous execution.
+def _screenshot_thread_safe(page, **kwargs) -> bytes:
+    """Take a screenshot from any thread.
+
+    patchright's sync API uses greenlets bound to the creating thread.
+    Calling page.screenshot() from a background thread raises
+    greenlet.error: Cannot switch to a different thread.
+
+    This bypasses the greenlet layer by submitting the async coroutine
+    directly to the Playwright event loop via asyncio.run_coroutine_threadsafe,
+    which is designed for cross-thread coroutine submission.
     """
-    try:
-        # Take a compressed JPEG screenshot for speed
-        screenshot_bytes = page.screenshot(type='jpeg', quality=80)
-        
-        # Base64 encode for WebSocket transmission
-        b64_data = base64.b64encode(screenshot_bytes).decode('utf-8')
-        
-        # Publish to Redis channel monitored by the API
+    import asyncio
+    future = asyncio.run_coroutine_threadsafe(
+        page._impl_obj.screenshot(**kwargs),
+        page._loop,
+    )
+    return future.result(timeout=10)
+
+
+def broadcast_screen(page, account_id: str = None, r=None):
+    """Publish a JPEG screenshot to Redis for the dashboard live view.
+
+    Pass a persistent Redis client via `r` to avoid reconnecting every frame.
+    Falls back to creating a one-shot connection when `r` is None.
+    """
+    _owned = r is None
+    if _owned:
         redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         r = redis.Redis.from_url(redis_url)
-        r.publish("live_view", b64_data)
+    try:
+        screenshot_bytes = _screenshot_thread_safe(page, type="jpeg", quality=60)
+        b64_data = base64.b64encode(screenshot_bytes).decode()
+        channel = f"live_view_{account_id}" if account_id else "live_view"
+        r.publish(channel, b64_data)
+    except Exception:
+        pass
+    finally:
+        if _owned:
+            r.close()
+
+
+def start_screen_broadcast(page, account_id: str = None, fps: float = 2.0) -> threading.Event:
+    """Spawn a daemon thread that streams screenshots to Redis at `fps`.
+
+    Returns a stop Event — set it before closing the browser so the thread
+    exits cleanly and the Redis connection is released.
+    """
+    stop = threading.Event()
+    interval = 1.0 / fps
+
+    def _loop():
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        r = redis.Redis.from_url(redis_url)
+        try:
+            while not stop.is_set():
+                try:
+                    broadcast_screen(page, account_id=account_id, r=r)
+                except Exception:
+                    pass
+                stop.wait(interval)
+        finally:
+            try:
+                r.close()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_loop, daemon=True, name=f"broadcast-{account_id or 'legacy'}")
+    t.start()
+    return stop
+
+
+def publish_agent_status(status: str, account_id: str = None):
+    """Publish agent status string to Redis for the dashboard."""
+    try:
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        r = redis.Redis.from_url(redis_url)
+        channel = f"agent_status_{account_id}" if account_id else "agent_status"
+        r.publish(channel, status)
         r.close()
-    except Exception as e:
-        # Failing to broadcast isn't fatal, so just log it
+    except Exception:
         pass

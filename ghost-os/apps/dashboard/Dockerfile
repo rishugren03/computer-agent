@@ -24,6 +24,6 @@ RUN pnpm --filter dashboard build
 # Expose port
 EXPOSE 3000
 
-# Start the app
-WORKDIR /app/apps/dashboard
-CMD ["pnpm", "start"]
+# Start the app (push DB schema on first run, idempotent)
+WORKDIR /app
+CMD ["sh", "-c", "pnpm --filter @ghost-os/database exec prisma db push --skip-generate && cd apps/dashboard && pnpm start"]

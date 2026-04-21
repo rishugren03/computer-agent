@@ -291,6 +291,32 @@ def cmd_test_connect(args):
         close_browser(context, playwright)
 
 
+def cmd_test_ax(args):
+    """Test the AXTree snapshotting and agent ID assignment."""
+    from browser import open_browser, close_browser, wait_for_stable
+    from accessibility import get_ax_snapshot
+    
+    url = args[0] if args else "https://www.linkedin.com/feed/"
+    print(f"🌲 Testing AXTree Snapshotting for: {url}")
+    
+    page, context, playwright = open_browser(url)
+    wait_for_stable(page, timeout=10000)
+    
+    try:
+        snapshot = get_ax_snapshot(page)
+        print("\n--- [ AXTree Snapshot (Simplified YAML) ] ---")
+        print(snapshot)
+        print("\n--- [ End Snapshot ] ---")
+        
+        print("\n🎉 Test complete! Browser will remain open for 10 seconds.")
+        import time
+        time.sleep(10)
+    except Exception as e:
+        print(f"❌ Error during AX test: {e}")
+    finally:
+        close_browser(context, playwright)
+
+
 def cmd_help(args=None):
     """Print help message."""
     print("""
@@ -305,6 +331,7 @@ Commands:
   python cli.py warmup             Manually trigger a warm-up session
   python cli.py test_search "Name" Test the search functionality isolated
   python cli.py test_connect "Name" Test the connection functionality isolated
+  python cli.py test_ax [url]      Test the AXTree snapshotting (default: feed)
   python cli.py help               Show this help message
 
 Examples:
@@ -327,6 +354,7 @@ COMMANDS = {
     "setup": cmd_setup,
     "test_search": cmd_test_search,
     "test_connect": cmd_test_connect,
+    "test_ax": cmd_test_ax,
     "help": cmd_help,
 }
 

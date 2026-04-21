@@ -22,7 +22,7 @@ import random
 
 from config import SCREENSHOT_DIR, DATA_DIR
 from browser import open_browser, take_screenshot, wait_for_stable, close_browser
-from human import random_delay
+from human import random_delay, apply_interaction_jitter
 from scheduler import (
     is_active_hours,
     wait_for_active_hours,
@@ -37,14 +37,14 @@ from linkedin.warmup import WarmupSequence
 from linkedin.connect import send_connection
 from linkedin.interact import organic_feed_engagement, pre_connection_engagement
 from linkedin.inbox import process_inbox
-from linkedin.kill_switch import start_monitor
-import linkedin.kill_switch as ks
 from navigator import navigate_to_feed, random_detour
 from persona import load_persona
 from ghostwriter import generate_connection_note, generate_comment, generate_reply
 from approval_queue import ApprovalQueue
 from diversity import DiversityEngine
 from vision import describe_page
+from linkedin.kill_switch import start_monitor
+import linkedin.kill_switch as ks
 
 
 def run_agent(prospects=None, continuous=False):
@@ -95,6 +95,11 @@ def run_agent(prospects=None, continuous=False):
         print("\n[Agent] 🚀 Starting new session...")
         page, context, playwright = open_browser("https://www.linkedin.com/feed/")
         wait_for_stable(page, timeout=10000)
+        
+        # Apply initial jitter to establish human footprint
+        apply_interaction_jitter(page)
+
+        # Live View will now be handled inside human.py's random_delay function safely.
 
         try:
             # ─── Verify Session ──────────────────────────────────────
@@ -157,7 +162,6 @@ def run_agent(prospects=None, continuous=False):
                 print("[Agent] 🚨 KILL SWITCH ACTIVATED — Aborting Session")
                 close_browser(context, playwright)
                 return
-
             print("\n[Agent] 📱 Organic feed engagement...")
             organic_feed_engagement(
                 page,
@@ -186,7 +190,6 @@ def run_agent(prospects=None, continuous=False):
                 print("[Agent] 🚨 KILL SWITCH ACTIVATED — Aborting Session")
                 close_browser(context, playwright)
                 return
-
             approved = queue.get_approved()
             if approved:
                 if not check_session_or_relogin(page):
@@ -230,6 +233,9 @@ def run_agent(prospects=None, continuous=False):
                     # Random micro-break
                     if should_take_break():
                         _take_break()
+                    else:
+                        # Otherwise, just some micro-jitter
+                        apply_interaction_jitter(page)
 
             # Step 3: Process inbox
             if not _session_expired(session_start, session_duration):
@@ -239,6 +245,10 @@ def run_agent(prospects=None, continuous=False):
                     continue
 
                 print("\n[Agent] 📬 Checking inbox...")
+                if ks.ABORT_AUTOMATION:
+                    print("[Agent] 🚨 KILL SWITCH ACTIVATED — Aborting Session")
+                    close_browser(context, playwright)
+                    return
                 inbox_summary = process_inbox(
                     page,
                     reply_generator=lambda name, msg, intent: generate_reply(name, msg, intent, persona),
@@ -302,6 +312,7 @@ def run_agent(prospects=None, continuous=False):
             traceback.print_exc()
 
         finally:
+            stream_active = False
             close_browser(context, playwright)
 
         if not continuous:

@@ -13,7 +13,7 @@ import redis
 import json
 import os
 import time
-from db import update_session_cookies
+from db import update_account_session
 
 
 def is_logged_in(page):
@@ -94,41 +94,49 @@ def ensure_session(page):
     return True
 
 
-def wait_for_login(page, timeout_seconds=300):
+def wait_for_login(page, timeout_seconds=300, account_id: str = None):
     """Wait for the user to complete manual login via dashboard.
 
-    Broadens the status to 'manual_login_required' and listens for
-    mouse/keyboard interactions from the Redis 'agent_input' channel.
+    OAuth flows like "Sign in with Google" are handled by having agent_login.py
+    override window.open() to redirect in the same tab, so everything stays on
+    one page and no popup tracking is needed here.
+
+    Uses a single persistent Redis connection for the entire wait so we don't
+    pay TCP handshake overhead on every screenshot frame (~8fps target).
     """
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
     r = redis.Redis.from_url(redis_url)
     pubsub = r.pubsub()
-    pubsub.subscribe("agent_input")
+    input_channel = f"agent_input_{account_id}" if account_id else "agent_input"
+    status_channel = f"agent_status_{account_id}" if account_id else "agent_status"
+    pubsub.subscribe(input_channel)
 
     print("[Auth] ⏳ Waiting for manual LinkedIn login via dashboard...")
-    r.publish("agent_status", "manual_login_required")
+    r.publish(status_channel, "manual_login_required")
 
     start = time.time()
+    tick = 0
     try:
         while time.time() - start < timeout_seconds:
-            # 1. Check if logged in
-            if is_logged_in(page):
+            tick += 1
+
+            # Check login state every 5 ticks (~0.6s) — page.evaluate() blocks
+            if tick % 5 == 0 and is_logged_in(page):
                 print("[Auth] ✅ Login detected!")
-                r.publish("agent_status", "running")
-                
-                # Capture and save cookies
+                r.publish(status_channel, "running")
+
                 cookies = page.context.cookies()
                 li_at = next((c['value'] for c in cookies if c['name'] == 'li_at'), None)
                 jsessionid = next((c['value'] for c in cookies if c['name'] == 'JSESSIONID'), None)
-                
-                if li_at and jsessionid:
-                    update_session_cookies(li_at, jsessionid)
+
+                if li_at and jsessionid and account_id:
+                    update_account_session(account_id, li_at, jsessionid)
                     print("[Auth] 🍪 Session cookies saved to database.")
-                
+
                 random_delay(1.0, 2.0)
                 return True
 
-            # 2. Process pending interactions from dashboard
+            # Process pending interactions from dashboard
             message = pubsub.get_message(ignore_subscribe_messages=True)
             if message:
                 try:
@@ -137,13 +145,17 @@ def wait_for_login(page, timeout_seconds=300):
                 except Exception as e:
                     print(f"[Auth] Error handling interaction: {e}")
 
-            # 3. Keep the live view updated
-            broadcast_screen(page)
-            
-            time.sleep(0.5) # Poll frequently for responsiveness
+            # Keep the live view updated — reuse persistent r to skip TCP setup
+            try:
+                broadcast_screen(page, account_id=account_id, r=r)
+            except Exception:
+                pass
+
+            time.sleep(0.12)  # ~8fps
     finally:
-        pubsub.unsubscribe("agent_input")
-        r.publish("agent_status", "running")
+        pubsub.unsubscribe(input_channel)
+        r.publish(status_channel, "running")
+        r.close()
 
     print("[Auth] ❌ Login timeout reached.")
     return False
@@ -156,12 +168,7 @@ def _handle_dashboard_interaction(page, data):
     if action_type == "click":
         x, y = data.get("x"), data.get("y")
         if x is not None and y is not None:
-            # Physical click sequence for better reliability on dynamic elements
-            page.mouse.move(x, y)
-            page.mouse.down()
-            # Brief hold for realism and event registration
-            time.sleep(0.1)
-            page.mouse.up()
+            page.mouse.click(x, y)
             print(f"[Auth] 🖱️ Manual click at ({x}, {y})")
             
     elif action_type == "key":

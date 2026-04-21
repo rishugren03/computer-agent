@@ -822,7 +822,7 @@ def comment_on_post(page, comment_text, extracted_post_text=None):
         from navigator import _click_act_element
         _click_act_element(page, comment_buttons[0])
         print("[Interact] [Comment] ✅ Opened via ACT")
-    _click_act_element(page, comment_buttons[0])
+        comment_opened = True
     random_delay(0.8, 1.5)
     wait_for_stable(page, timeout=3000)
 

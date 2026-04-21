@@ -7,6 +7,7 @@ and DeepSeek for text-based action decisions. No local VLM dependency.
 import os
 import json
 import time
+import hashlib
 from PIL import Image
 from google import genai
 from openai import OpenAI
@@ -14,7 +15,12 @@ from dotenv import load_dotenv
 
 from config import (
     GEMINI_API_KEY,
+    GEMINI_VISION_MODEL,
     GEMINI_FAST_MODEL,
+    GEMINI_FLASH_LITE_MODEL,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_MODEL,
     SCREENSHOT_DIR,
 )
 
@@ -24,7 +30,12 @@ load_dotenv()
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# (No DeepSeek client anymore - using Gemini for all interactions)
+# ─── DeepSeek Text Client ───────────────────────────────────────────────────
+
+deepseek_client = OpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url=DEEPSEEK_BASE_URL,
+)
 
 # ─── Retry Config ───────────────────────────────────────────────────────────
 
@@ -168,7 +179,7 @@ def analyze_image(image_path, prompt):
         try:
             img = Image.open(image_path)
             response = gemini_client.models.generate_content(
-                model=GEMINI_FAST_MODEL,
+                model=GEMINI_VISION_MODEL,
                 contents=[prompt, img],
             )
             return response.text
@@ -225,9 +236,13 @@ Return ONLY valid JSON. No explanation."""
         result = json.loads(cleaned)
         if result.get("found", False):
             return result
+        else:
+            print(f"[Vision] Element '{element_description}' not found: {result.get('reason', 'unknown')}")
+            return None
     except json.JSONDecodeError:
         print(f"[Vision] Could not parse response for '{element_description}'")
         return None
+
 
 def get_element_coordinates_fast(screenshot_path, target_description):
     """Vision-Coordinate Module for Speculative Execution.
@@ -248,13 +263,11 @@ def get_element_coordinates_fast(screenshot_path, target_description):
             img.save(screenshot_path)
     except Exception as e:
         print(f"[Vision] Error downscaling screenshot: {e}")
-
     prompt = f"Return ONLY the [x, y] center coordinates of the {target_description} in JSON format: {{'x': 123, 'y': 456}}."
     
     response_text = analyze_image(screenshot_path, prompt)
     if not response_text:
         return None
-
     try:
         cleaned = response_text.strip()
         if cleaned.startswith("```"):
@@ -262,7 +275,6 @@ def get_element_coordinates_fast(screenshot_path, target_description):
             if cleaned.endswith("```"):
                 cleaned = cleaned[:-3]
             cleaned = cleaned.strip()
-
         result = json.loads(cleaned)
         if "x" in result and "y" in result:
             return {"x": result["x"], "y": result["y"], "label": target_description, "found": True}
@@ -306,6 +318,162 @@ Your job is to decide the SINGLE NEXT ACTION to take.
 ## Response Format
 Return ONLY valid JSON. No explanation, no markdown, no extra text.
 """
+
+
+# ─── Orchestration: Navigator x Pilot ───────────────────────────────────────
+
+# Global cache for AXTree fast-path
+_ax_cache: dict[str, str] = {
+    "hash": "",
+    "strategy": ""
+}
+
+def decide_action_orchestrated(goal, ax_tree_yaml, page_description, action_history=None):
+    """Multi-Tier Model Orchestration: Navigator x Pilot.
+    
+    1. Navigator (Strategic): High-reasoning defines the plan.
+    2. Fast-Path: Cache strategy if AXTree hasn't changed.
+    3. Pilot (Execution): Low-latency parses AXTree for IDs.
+    """
+    # ─── 1. Navigator: Strategic Plan ───────────────────────────────────────
+    
+    # Check fast-path cache
+    current_hash = hashlib.md5(ax_tree_yaml.encode()).hexdigest()
+    if _ax_cache["hash"] == current_hash and _ax_cache["strategy"]:
+        print("[Vision] ⚡ Fast-Path Cache Hit: Skipping Navigator.")
+        strategy = _ax_cache["strategy"]
+    else:
+        print("[Vision] 🧭 Navigator: Defining new strategy...")
+        strategy = _get_navigator_strategy(goal, ax_tree_yaml, page_description, action_history)
+        _ax_cache["hash"] = current_hash
+        _ax_cache["strategy"] = strategy
+
+    # ─── 2. Pilot: Tactical Execution ─────────────────────────────────────────
+    
+    print("[Vision] ✈️  Pilot: Executing tactical move...")
+    return _execute_pilot_action(strategy, ax_tree_yaml, action_history)
+
+
+def _get_navigator_strategy(goal, ax_tree_yaml, page_description, action_history=None):
+    """High-reasoning Navigator to define the multi-step goal."""
+    history_text = ""
+    if action_history:
+        recent = action_history[-8:]
+        history_text = "\n".join([f"  - {json.dumps(a)}" for a in recent])
+
+    prompt = f"""You are the Navigator (Strategy Engine).
+Objective: {goal}
+Page Description: {page_description}
+Action History:
+{history_text if history_text else "None"}
+
+Simplified AXTree:
+{ax_tree_yaml}
+
+Based on the objective and the current page, define the NEXT STRATEGIC STEP.
+Keep it concise and focus on WHAT to do next (e.g., "Open the 'Connect' modal" or "Search for the prospect").
+Do not return JSON, just a one-sentence strategy.
+"""
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = gemini_client.models.generate_content(
+                model=GEMINI_VISION_MODEL, # High reasoning (Flash 2.0)
+                contents=prompt,
+            )
+            return response.text.strip()
+        except Exception as e:
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF ** (attempt + 1))
+            else:
+                return f"Attempt to reach objective: {goal}"
+
+
+def _execute_pilot_action(strategy, ax_tree_yaml, action_history=None):
+    """Low-latency Pilot to parse the AXTree and return the exact action."""
+    prompt = f"""You are the Pilot (Execution Engine).
+Current Strategy: {strategy}
+
+Simplified AXTree (with data-agent-ids):
+{ax_tree_yaml}
+
+Your job is to pick the exact element ID from the AXTree that fulfills the strategy.
+Return ONLY a JSON object representing the action.
+
+Available Actions:
+- {{"action": "click", "id": "agent-ID"}}
+- {{"action": "type", "id": "agent-ID", "text": "text to type"}}
+- {{"action": "scroll", "direction": "down|up", "amount": 500}}
+- {{"action": "wait", "seconds": 2}}
+- {{"action": "done", "reason": "objective complete"}}
+
+Return ONLY valid JSON."""
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = gemini_client.models.generate_content(
+                model=GEMINI_FLASH_LITE_MODEL, # Low latency (Flash-Lite 2.0)
+                contents=prompt,
+            )
+            text = response.text.strip()
+            
+            # Clean JSON
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1]
+                if text.endswith("```"):
+                    text = text[:-3]
+                text = text.strip()
+                
+            return json.loads(text)
+        except Exception as e:
+            print(f"[Pilot] Error: {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(1)
+            else:
+                return {"action": "wait", "seconds": 2}
+
+
+def verify_action_async(page, action, expected_outcome):
+    """Asynchronous Visual Verification.
+    
+    Takes a screenshot after an action and uses Flash-Lite to verify success.
+    If a roadblock is detected, returns a high-priority interrupt.
+    """
+    from browser import take_screenshot
+    
+    # 1. Take immediate post-action screenshot
+    screenshot_path = os.path.join(SCREENSHOT_DIR, f"verify_{int(time.time())}.png")
+    take_screenshot(page, screenshot_path)
+    
+    # 2. Flash-Lite Verification Prompt
+    prompt = f"""You are the Verifier. An action was just taken: {json.dumps(action)}
+    Expected Outcome: {expected_outcome}
+    
+    Look at the screenshot and determine:
+    1. Did the action succeed?
+    2. Is there a roadblock (verification modal, popup, error toast)?
+    
+    Return ONLY JSON:
+    {{"success": true|false, "roadblock": true|false, "details": "reasoning"}}
+    """
+    
+    # This would typically be run in a background thread or as a non-blocking call
+    # For now, we return the result directly.
+    try:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_FLASH_LITE_MODEL,
+            contents=[prompt, Image.open(screenshot_path)],
+        )
+        text = response.text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+        return json.loads(text)
+    except Exception as e:
+        print(f"[Verifier] Error during async verification: {e}")
+        return {"success": True, "roadblock": False, "error": str(e)}
 
 
 def decide_action(goal, page_description, elements, action_history=None):

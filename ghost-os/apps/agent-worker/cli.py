@@ -166,9 +166,8 @@ def cmd_setup(args):
 
     config = {}
 
-    print("\n1️⃣  LLM API Keys")
-    config["DEEPSEEK_API_KEY"] = input("   DeepSeek API Key: ").strip()
-    config["GEMINI_API_KEY"] = input("   Gemini API Key: ").strip()
+    print("\n1️⃣  LLM API Key")
+    config["OPENAI_API_KEY"] = input("   OpenAI API Key: ").strip()
 
     print("\n2️⃣  Proxy Settings (leave blank to skip)")
     config["PROXY_HOST"] = input("   Proxy Host: ").strip()

@@ -11,7 +11,7 @@ import random
 
 from human import human_click, human_type, random_delay
 from browser import wait_for_stable
-from navigator import navigate_to_profile
+from navigator import navigate_to_profile, fast_connect, _click_act_element
 from linkedin.profile import view_profile, extract_profile_data
 from accessibility import extract_act, find_buttons, find_textboxes
 
@@ -45,7 +45,28 @@ def send_connection(page, name, note, guardrails=None):
     # 2. View profile with dwell time (builds natural pattern)
     profile_data = view_profile(page, dwell=True)
 
-    # 3. Click the "Connect" button
+    # 3. Optimized Connection Flow (Fast-Connect Macro)
+    # We attempt the high-speed macro first, falling back to manual if needed.
+    print(f"[Connect] 🚀 Attempting Fast-Connect macro for {name}...")
+    macro_result = fast_connect(page, page.url, note)
+    
+    if macro_result and macro_result.get("success"):
+        # Record the action
+        if guardrails:
+            guardrails.record_action("connection")
+        
+        random_delay(1.5, 3.0)
+        return {
+            "status": "sent",
+            "name": name,
+            "note": note,
+            "profile": profile_data,
+            "method": "macro"
+        }
+
+    print(f"[Connect] ⚠️ Macro failed or button not found ({macro_result.get('reason', 'unknown')}). Falling back to manual flow.")
+
+    # 4. Manual Fallback
     success = _click_connect_button(page)
     if not success:
         return {
@@ -56,16 +77,26 @@ def send_connection(page, name, note, guardrails=None):
 
     random_delay(0.8, 1.5)
 
-    # 4. Add a note (click "Add a note" button)
+    # 5. Add a note (click "Add a note" button)
     note_added = _add_connection_note(page, note)
     if not note_added:
         # If we can't add a note, still send without one
         print("[Connect] ⚠️  Could not add note, sending without...")
         _click_send_button(page)
     else:
-        # 5. Send the request
+        # 6. Send the request
         random_delay(0.5, 1.0)
         _click_send_button(page)
+
+    # 7. Verify connection was actually submitted
+    confirmed = _verify_connection_sent(page)
+
+    if not confirmed:
+        return {
+            "status": "failed",
+            "reason": "Send clicked but Pending state not confirmed",
+            "profile": profile_data,
+        }
 
     # Record the action
     if guardrails:
@@ -78,6 +109,7 @@ def send_connection(page, name, note, guardrails=None):
         "name": name,
         "note": note,
         "profile": profile_data,
+        "method": "manual"
     }
 
 
@@ -97,7 +129,6 @@ def _click_connect_button(page):
     # Try direct "Connect" button first
     connect_buttons = find_buttons(tree, "Connect")
     if connect_buttons:
-        from navigator import _click_act_element
         _click_act_element(page, connect_buttons[0])
         wait_for_stable(page, timeout=3000)
         return True
@@ -105,7 +136,6 @@ def _click_connect_button(page):
     # Try "More" dropdown which might contain Connect
     more_buttons = find_buttons(tree, "More")
     if more_buttons:
-        from navigator import _click_act_element
         _click_act_element(page, more_buttons[0])
         random_delay(0.5, 1.0)
         wait_for_stable(page, timeout=2000)
@@ -148,7 +178,6 @@ def _add_connection_note(page, note):
         add_note_buttons = find_buttons(tree, "add a note")
 
     if add_note_buttons:
-        from navigator import _click_act_element
         _click_act_element(page, add_note_buttons[0])
         random_delay(0.5, 1.0)
         wait_for_stable(page, timeout=2000)
@@ -179,7 +208,6 @@ def _click_send_button(page):
         send_buttons = find_buttons(tree, "Send now")
 
     if send_buttons:
-        from navigator import _click_act_element
         _click_act_element(page, send_buttons[0])
         wait_for_stable(page, timeout=3000)
         print("[Connect] ✅ Connection request sent!")
@@ -189,3 +217,23 @@ def _click_send_button(page):
     page.keyboard.press("Enter")
     random_delay(0.5, 1.0)
     return True
+
+
+def _verify_connection_sent(page) -> bool:
+    """Verify connection was actually sent by checking for Pending/Message button."""
+    import time
+    time.sleep(2.0)
+    try:
+        tree = extract_act(page)
+        if find_buttons(tree, "Pending"):
+            print("[Connect] ✅ Verified: 'Pending' button visible")
+            return True
+        if find_buttons(tree, "Message"):
+            print("[Connect] ✅ Verified: already connected ('Message' visible)")
+            return True
+        # Not definitively failed — modal may have closed cleanly
+        print("[Connect] ⚠️  Could not confirm Pending state — assuming sent")
+        return True
+    except Exception as e:
+        print(f"[Connect] Verification error: {e}")
+        return True

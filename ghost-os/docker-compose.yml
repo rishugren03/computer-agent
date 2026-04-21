@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: ghost_os
     ports:
-      - "5433:5432"
+      - "5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -34,6 +34,8 @@ services:
       context: ./apps/agent-worker
       dockerfile: Dockerfile
     container_name: ghost-os-agent-worker
+    volumes:
+      - ./apps/agent-worker:/app
     depends_on:
       redis:
         condition: service_healthy
@@ -42,6 +44,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/ghost_os
+      - JWT_SECRET=${JWT_SECRET:-ghost-os-dev-secret-change-in-prod}
     env_file:
       - .env
 
@@ -50,9 +53,11 @@ services:
       context: ./apps/agent-worker
       dockerfile: Dockerfile
     container_name: ghost-os-agent-api
-    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--ws", "wsproto"]
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--ws", "wsproto"]
     ports:
       - "8000:8000"
+    volumes:
+      - ./apps/agent-worker:/app
     depends_on:
       redis:
         condition: service_healthy
@@ -61,6 +66,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/ghost_os
+      - JWT_SECRET=${JWT_SECRET:-ghost-os-dev-secret-change-in-prod}
     env_file:
       - .env
 
@@ -76,9 +82,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      agent-api:
+        condition: service_started
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/ghost_os
       - REDIS_URL=redis://redis:6379/0
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
     env_file:
       - apps/dashboard/.env
 

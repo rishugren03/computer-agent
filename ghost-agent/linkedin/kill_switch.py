@@ -1,16 +1,15 @@
 """The Ghost Inbox Monitor — High-speed Kill Switch.
-
 Polls the LinkedIn messaging thread in the background using Vision.
 If a new message indicator is detected via Gemini Flash-Lite, it triggers
 an immediate abort of all automation.
 """
-
 import threading
 import time
 import sys
 import os
 import json
 
+# Ensure parent directory is in path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from vision import analyze_image
@@ -32,7 +31,7 @@ def ghost_inbox_monitor_loop(context):
         
         while not ABORT_AUTOMATION:
             try:
-                # Refresh sporadically to get new messages
+                # Refresh periodically to get new messages
                 time.sleep(15) 
                 
                 # Take screenshot

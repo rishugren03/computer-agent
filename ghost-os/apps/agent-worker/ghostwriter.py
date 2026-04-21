@@ -6,16 +6,16 @@ Generates hyper-personalized:
 - Inbox replies matching the user's persona
 - Post content (future GhostWriter feature)
 
-Uses DeepSeek for text generation with persona-aware prompts.
+Uses OpenAI for text generation with persona-aware prompts.
 """
 
 import json
 import time
 
-from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+from config import OPENAI_API_KEY, OPENAI_VISION_MODEL
 from openai import OpenAI
 
-client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 MAX_RETRIES = 3
 
@@ -211,15 +211,19 @@ Return ONLY the post text."""
 
 
 def _generate_text(prompt, max_tokens=200):
-    """Generate text using DeepSeek with retry logic.
+    """Generate text using OpenAI with retry logic.
 
     Returns:
         str: Generated text, or empty string on failure.
     """
+    if not client:
+        print("[GhostWriter] OPENAI_API_KEY is not configured")
+        return ""
+
     for attempt in range(MAX_RETRIES):
         try:
             response = client.chat.completions.create(
-                model=DEEPSEEK_MODEL,
+                model=OPENAI_VISION_MODEL,
                 messages=[
                     {
                         "role": "system",

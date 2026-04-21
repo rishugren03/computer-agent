@@ -13,6 +13,8 @@ import random
 import os
 import time
 import json
+import base64
+# redis is imported lazily in broadcast_screen for CLI compatibility
 
 from config import (
     BROWSER_DATA_DIR,
@@ -70,7 +72,7 @@ def open_browser(url="https://www.linkedin.com"):
     # Build launch options
     launch_args = {
         "user_data_dir": user_data_dir,
-        "headless": False,
+        "headless": True,
         "viewport": {"width": width, "height": height},
         "user_agent": user_agent,
         "locale": USER_LOCALE,
@@ -88,8 +90,6 @@ def open_browser(url="https://www.linkedin.com"):
             "latitude": USER_LATITUDE,
             "longitude": USER_LONGITUDE,
         },
-        "bypass_csp": True,
-        "ignore_https_errors": True,
     }
 
     # Add proxy if configured
@@ -101,6 +101,19 @@ def open_browser(url="https://www.linkedin.com"):
 
     # Set geolocation permissions
     context.grant_permissions(["geolocation"])
+
+    # INJECT GHOST-OS DATABASE COOKIES
+    try:
+        from db import get_session_cookies
+        cookies = get_session_cookies()
+        if cookies and cookies.get('li_at'):
+            print("[Browser] 🍪 Injecting LinkedIn cookies from Postgres!")
+            context.add_cookies([
+                {"name": "li_at", "value": cookies['li_at'], "domain": ".www.linkedin.com", "path": "/"},
+                {"name": "JSESSIONID", "value": cookies['JSESSIONID'], "domain": ".www.linkedin.com", "path": "/"}
+            ])
+    except ImportError:
+        pass
 
     page = context.pages[0] if context.pages else context.new_page()
 
@@ -148,6 +161,68 @@ def open_browser(url="https://www.linkedin.com"):
                 cursor.style.backgroundColor = 'rgba(255, 0, 0, 0.6)';
                 cursor.style.transform = 'translate(-50%, -50%) scale(1)';
             }, { capture: true });
+
+            // ─── Ghost Skills Macros ─────────────────────────────────────────
+            window.ghost_macros = {
+                sendInviteMacro: async (note) => {
+                    console.log("[Ghost] 🚀 Executing SendInviteMacro...");
+                    const connectBtn = Array.from(document.querySelectorAll('button'))
+                        .find(b => b.innerText.includes('Connect') || b.getAttribute('aria-label')?.includes('Connect'));
+                    
+                    if (!connectBtn) return { success: false, reason: "Connect button not found" };
+                    connectBtn.click();
+
+                    // Wait for modal with timeout
+                    let start = Date.now();
+                    while (Date.now() - start < 2000) {
+                        const addNoteBtn = Array.from(document.querySelectorAll('button'))
+                            .find(b => b.innerText.includes('Add a note') || b.getAttribute('aria-label')?.includes('Add a note'));
+                        
+                        if (addNoteBtn) {
+                            addNoteBtn.click();
+                            break;
+                        }
+                        
+                        // Check if direct send is possible (no note required?)
+                        const sendNow = Array.from(document.querySelectorAll('button'))
+                            .find(b => b.innerText.includes('Send without a note') || b.getAttribute('aria-label')?.includes('Send now'));
+                        if (sendNow && !note) {
+                            sendNow.click();
+                            return { success: true, method: "direct" };
+                        }
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+
+                    // Type note
+                    if (note) {
+                        start = Date.now();
+                        while (Date.now() - start < 1500) {
+                            const textArea = document.querySelector('textarea#custom-message, textarea[name="message"]');
+                            if (textArea) {
+                                textArea.value = note;
+                                textArea.dispatchEvent(new Event('input', { bubbles: true }));
+                                break;
+                            }
+                            await new Promise(r => setTimeout(r, 100));
+                        }
+                    }
+
+                    // Click Send
+                    const sendBtn = Array.from(document.querySelectorAll('button'))
+                        .find(b => b.innerText.includes('Send') || b.getAttribute('aria-label')?.includes('Send invitation'));
+                    
+                    if (sendBtn) {
+                        sendBtn.click();
+                        return { success: true };
+                    }
+                    return { success: false, reason: "Send button not found" };
+                },
+
+                organicScroll: async (amount = 500) => {
+                    window.scrollBy({ top: amount, behavior: 'smooth' });
+                    return { success: true };
+                }
+            };
         });
     """)
 
@@ -181,16 +256,18 @@ def take_screenshot(page, path=None):
 def wait_for_stable(page, timeout=5000):
     """Wait for the page to become somewhat stable (fast execution).
     
-    Speculative Execution: We wait for 'commit' rather than 'networkidle'
-    to allow the vision agent to start acting before fully rendering.
+    Uses a speculative approach:
+    1. Wait for 'commit' rather than 'networkidle' to allow vision to act earlier.
+    2. Brief additional wait for JS rendering.
     """
     try:
         page.wait_for_load_state("commit", timeout=timeout)
     except Exception:
-        pass
-        
-    # Micro-wait for any JS rendering to start
-    time.sleep(random.uniform(0.1, 0.3))
+        # Commit timeout, wait briefly
+        time.sleep(1.5)
+
+    # Brief additional wait for any JS rendering to complete
+    time.sleep(random.uniform(0.3, 0.8))
 
 
 def get_current_url(page):
@@ -218,4 +295,28 @@ def close_browser(context, playwright):
     try:
         playwright.stop()
     except Exception:
+        pass
+
+
+def broadcast_screen(page):
+    """Capture a screenshot of the current page and publish it to Redis.
+    
+    This is used to feed the Live View stream on the dashboard during
+    manual interactions or autonomous execution.
+    """
+    try:
+        # Take a compressed JPEG screenshot for speed
+        screenshot_bytes = page.screenshot(type='jpeg', quality=80)
+        
+        # Base64 encode for WebSocket transmission
+        b64_data = base64.b64encode(screenshot_bytes).decode('utf-8')
+        
+        # Publish to Redis channel monitored by the API
+        import redis
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        r = redis.Redis.from_url(redis_url)
+        r.publish("live_view", b64_data)
+        r.close()
+    except Exception as e:
+        # Failing to broadcast isn't fatal, so just log it
         pass

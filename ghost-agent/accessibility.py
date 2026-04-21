@@ -10,6 +10,186 @@ element identification.
 """
 
 import json
+import yaml
+
+
+def assign_agent_ids(page):
+    """Assign temporary data-agent-id attributes to interactive elements in the live DOM.
+    
+    This ensures the LLM's selected ID maps perfectly to a Playwright locator.
+    """
+    page.evaluate("""() => {
+        const interactiveRoles = [
+            'button', 'link', 'textbox', 'checkbox', 'menuitem', 'option', 
+            'radio', 'switch', 'tab', 'combobox', 'searchbox'
+        ];
+        const elements = document.querySelectorAll('*');
+        let idCounter = 0;
+        elements.forEach(el => {
+            const role = el.getAttribute('role') || el.tagName.toLowerCase();
+            const ariaRole = el.getAttribute('role');
+            if (interactiveRoles.includes(role) || interactiveRoles.includes(ariaRole)) {
+                if (!el.hasAttribute('data-agent-id')) {
+                    el.setAttribute('data-agent-id', `agent-${idCounter++}`);
+                }
+            }
+        });
+    }""")
+
+
+def get_ax_snapshot(page):
+    """Extract a simplified Accessibility Tree snapshot.
+    
+    Filters for interactive roles and formats as a compact YAML string.
+    Includes data-agent-ids for perfect LLM mapping.
+    """
+    assign_agent_ids(page)
+    
+    # 1. Use the official snapshot API as requested
+    try:
+        snapshot = page.accessibility.snapshot()
+        if not snapshot:
+            return ""
+        
+        # 2. Correlate snapshot nodes with data-agent-ids via DOM lookup
+        # This is the "High-Precision" part.
+        enhanced_tree = _correlate_ids(page, snapshot)
+        
+        # 3. Filter for interactive roles
+        filtered_tree = _filter_ax_tree(enhanced_tree)
+        
+        # 4. Format as compact YAML
+        if filtered_tree:
+            try:
+                import yaml
+                return yaml.dump(filtered_tree, sort_keys=False, default_flow_style=False)
+            except ImportError:
+                # Fallback to manual YAML-like formatting
+                return "\n".join(_manual_yaml_format(filtered_tree))
+        return "No interactive elements found."
+    except Exception as e:
+        print(f"[AX] Snapshot failed: {e}")
+        return ""
+
+
+def _manual_yaml_format(node, indent=0):
+    """Manual YAML-like formatter for AXTree nodes (fallback for PyYAML)."""
+    if not node:
+        return []
+    
+    lines = []
+    prefix = "  " * indent
+    
+    role = node.get("role", "unknown")
+    name = node.get("name", "")
+    agent_id = node.get("id", "")
+    
+    lines.append(f"{prefix}- role: {role}")
+    if name:
+        lines.append(f"{prefix}  name: \"{name}\"")
+    if agent_id:
+        lines.append(f"{prefix}  agent_id: {agent_id}")
+        
+    for child in node.get("children", []):
+        lines.extend(_manual_yaml_format(child, indent + 1))
+    
+    return lines
+
+
+def _correlate_ids(page, node):
+    """Recursively correlate snapshot nodes with data-agent-ids from the DOM."""
+    if not node:
+        return None
+    
+    role = node.get("role", "")
+    name = node.get("name", "")
+    
+    agent_id = None
+    if name or role in {'button', 'link', 'textbox', 'checkbox', 'menuitem'}:
+        # Use page.evaluate to find the data-agent-id for this role/name
+        agent_id = page.evaluate(f"""() => {{
+            const elements = document.querySelectorAll(`[data-agent-id]`);
+            for (const el of elements) {{
+                const elRole = el.getAttribute('role') || el.tagName.toLowerCase();
+                const elName = el.getAttribute('aria-label') || el.innerText?.trim();
+                // Match by role and name (loose comparison for speed and flexibility)
+                if (elRole.toLowerCase() === "{role.lower()}" && (elName?.includes("{name}") || "{name}".includes(elName || ""))) {{
+                    return el.getAttribute('data-agent-id');
+                }}
+            }}
+            return null;
+        }}""")
+
+    enhanced_node = {
+        "role": role,
+        "name": name,
+        "agent_id": agent_id,
+        "children": [],
+    }
+    
+    if node.get("description"):
+        enhanced_node["description"] = node["description"]
+    if node.get("value"):
+        enhanced_node["value"] = node["value"]
+    if node.get("checked") is not None:
+        enhanced_node["checked"] = node["checked"]
+    if node.get("disabled"):
+        enhanced_node["disabled"] = node["disabled"]
+    if node.get("focused"):
+        enhanced_node["focused"] = node["focused"]
+
+    for child in node.get("children", []) or []:
+        enhanced_child = _correlate_ids(page, child)
+        if enhanced_child:
+            if "children" not in enhanced_node:
+                enhanced_node["children"] = []
+            enhanced_node["children"].append(enhanced_child)
+            
+    return enhanced_node
+
+
+def _filter_ax_tree(node):
+    """Recursively filter AXTree for interactive roles and relevance."""
+    if not node:
+        return None
+    
+    role = node.get("role", "").lower()
+    interactive_roles = {"button", "link", "textbox", "checkbox", "menuitem", "combobox", "searchbox", "tab", "option"}
+    
+    filtered_children = []
+    for child in node.get("children", []):
+        filtered_child = _filter_ax_tree(child)
+        if filtered_child:
+            filtered_children.append(filtered_child)
+            
+    is_interactive = role in interactive_roles or node.get("agent_id")
+    
+    if is_interactive or filtered_children:
+        result = {
+            "role": node["role"],
+            "name": node["name"],
+        }
+        if node.get("agent_id"):
+            result["id"] = node["agent_id"]
+        if node.get("description"):
+            result["desc"] = node["description"]
+        if node.get("value"):
+            result["val"] = node["value"]
+        if node.get("checked") is not None:
+            result["checked"] = node["checked"]
+        if node.get("disabled"):
+            result["disabled"] = node["disabled"]
+        if node.get("focused"):
+            result["focused"] = node["focused"]
+            
+        if filtered_children:
+            # Flatten empty groups or keep structure? LLM prefers structured for AXTree.
+            # But the user said "compact". Let's keep children if they are relevant.
+            result["children"] = filtered_children
+            
+        return result
+    
+    return None
 
 
 def extract_act(page):
@@ -243,14 +423,19 @@ def find_node_by_role_and_name(tree, role, name=None, partial_match=True):
     results = []
 
     for node in flat:
-        if node["role"].lower() != role.lower():
+        node_role = node.get("role", "") or ""
+        target_role = (role or "").lower()
+        if node_role.lower() != target_role:
             continue
+
+        node_name = node.get("name", "") or ""
+        search_name = name.lower() if name else ""
 
         if name is None:
             results.append(node)
-        elif partial_match and name.lower() in node["name"].lower():
+        elif partial_match and search_name in node_name.lower():
             results.append(node)
-        elif not partial_match and node["name"].lower() == name.lower():
+        elif not partial_match and node_name.lower() == search_name:
             results.append(node)
 
     return results
@@ -353,7 +538,7 @@ def get_interactive_elements_act(page):
     flat = act_to_flat_list(tree)
     elements = [
         node for node in flat
-        if node["role"].lower() in interactive_roles
+        if (node.get("role", "") or "").lower() in interactive_roles
         and not node.get("disabled", False)
     ]
 

@@ -8,11 +8,278 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model UserSession {
-  id             String   @id @default(uuid())
-  linkedinCookie String?  // li_at cooke
-  linkedinCsrf   String?  // JSESSIONID
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  isActive       Boolean  @default(true)
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  linkedInAccounts LinkedInAccount[]
+  campaigns        Campaign[]
+  agentTasks       AgentTask[]
+}
+
+model LinkedInAccount {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  liAt          String?
+  jsessionId    String?
+  sessionStatus SessionStatus @default(DISCONNECTED)
+
+  linkedInName     String?
+  linkedInUrl      String?
+  linkedInHeadline String?
+
+  warmupStatus      WarmupStatus @default(NOT_STARTED)
+  warmupStartedAt   DateTime?
+  warmupCompletedAt DateTime?
+  warmupSessions    Int          @default(0)
+  warmupLikes       Int          @default(0)
+  warmupProfileViews Int         @default(0)
+
+  agentStatus   AgentStatus @default(IDLE)
+  lastSessionAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaigns     Campaign[]
+  agentSessions AgentSession[]
+  guardrails    Guardrail[]
+  agentTasks    AgentTask[]
+
+  @@index([userId])
+}
+
+enum SessionStatus {
+  CONNECTED
+  DISCONNECTED
+  EXPIRED
+  SUSPENDED
+}
+
+enum WarmupStatus {
+  NOT_STARTED
+  DAY_1
+  DAY_2
+  COMPLETED
+}
+
+enum AgentStatus {
+  IDLE
+  WARMUP
+  RUNNING
+  PAUSED
+  ERROR
+}
+
+model Campaign {
+  id                String          @id @default(cuid())
+  userId            String
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  linkedInAccountId String
+  linkedInAccount   LinkedInAccount @relation(fields: [linkedInAccountId], references: [id])
+
+  name   String
+  goal   String
+  status CampaignStatus @default(DRAFT)
+
+  dailyConnectionLimit Int     @default(15)
+  dailyMessageLimit    Int     @default(30)
+  activeHoursStart     Int     @default(9)
+  activeHoursEnd       Int     @default(18)
+  timezone             String  @default("Asia/Kolkata")
+  autoApprove          Boolean @default(false)
+
+  personaTone   String  @default("professional")
+  personaSample String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  prospects Prospect[]
+
+  @@index([userId])
+  @@index([linkedInAccountId])
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+}
+
+model Prospect {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  linkedInUrl String
+  name        String?
+  headline    String?
+  company     String?
+  notes       String?
+
+  status      ProspectStatus @default(PENDING)
+  requestedAt DateTime?
+  connectedAt DateTime?
+  messagedAt  DateTime?
+  repliedAt   DateTime?
+
+  profileData Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  outreachMessages OutreachMessage[]
+
+  @@index([campaignId])
+  @@index([status])
+}
+
+enum ProspectStatus {
+  PENDING
+  PROFILE_VIEWED
+  REQUESTED
+  CONNECTED
+  MESSAGED
+  REPLIED
+  LEAD
+  REJECTED
+  SKIPPED
+}
+
+model OutreachMessage {
+  id         String   @id @default(cuid())
+  prospectId String
+  prospect   Prospect @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+
+  type          MessageType
+  content       String
+  status        MessageStatus @default(PENDING_REVIEW)
+  editedContent String?
+
+  reviewedAt    DateTime?
+  sentAt        DateTime?
+  failureReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([prospectId])
+  @@index([status])
+}
+
+enum MessageType {
+  CONNECTION_NOTE
+  FOLLOW_UP
+  REPLY
+}
+
+enum MessageStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  SENT
+  FAILED
+}
+
+model AgentSession {
+  id                String          @id @default(cuid())
+  linkedInAccountId String
+  linkedInAccount   LinkedInAccount @relation(fields: [linkedInAccountId], references: [id])
+
+  startedAt DateTime         @default(now())
+  endedAt   DateTime?
+  status    SessionRunStatus @default(RUNNING)
+
+  connectionsAttempted Int @default(0)
+  connectionsSent      Int @default(0)
+  likes                Int @default(0)
+  comments             Int @default(0)
+  messagesGenerated    Int @default(0)
+  profilesViewed       Int @default(0)
+
+  errorMessage String?
+  createdAt    DateTime @default(now())
+
+  actions ActionLog[]
+
+  @@index([linkedInAccountId])
+}
+
+enum SessionRunStatus {
+  RUNNING
+  COMPLETED
+  ERROR
+  ABORTED
+}
+
+model ActionLog {
+  id        String       @id @default(cuid())
+  sessionId String
+  session   AgentSession @relation(fields: [sessionId], references: [id])
+
+  action   String
+  target   String?
+  status   String
+  metadata Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+}
+
+model Guardrail {
+  id                String          @id @default(cuid())
+  linkedInAccountId String
+  linkedInAccount   LinkedInAccount @relation(fields: [linkedInAccountId], references: [id])
+
+  date              String
+
+  connectionsCount  Int @default(0)
+  profileViewsCount Int @default(0)
+  likesCount        Int @default(0)
+  commentsCount     Int @default(0)
+  messagesCount     Int @default(0)
+
+  @@unique([linkedInAccountId, date])
+  @@index([linkedInAccountId])
+}
+
+model AgentTask {
+  id                String          @id @default(cuid())
+  userId            String
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  linkedInAccountId String
+  linkedInAccount   LinkedInAccount @relation(fields: [linkedInAccountId], references: [id])
+
+  title       String
+  instruction String
+  status      AgentTaskStatus @default(PENDING)
+
+  result       String?
+  errorMessage String?
+  steps        Json?
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+  @@index([linkedInAccountId])
+}
+
+enum AgentTaskStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
 }
